@@ -1,5 +1,7 @@
 package com.kirora.androidsdk
 
+import android.content.Intent
+import android.os.Looper
 import com.google.gson.Gson
 import com.kirora.androidsdk.model.KiroraOptions
 import com.kirora.androidsdk.model.KiroraPushOptions
@@ -7,7 +9,10 @@ import com.kirora.androidsdk.model.PushPermission
 import com.kirora.androidsdk.model.PushStatus
 import com.kirora.androidsdk.net.FakeKiroraApiService
 import com.kirora.androidsdk.push.KiroraPushTracker
+import com.kirora.androidsdk.push.KiroraPushTrampolineActivity
 import com.kirora.androidsdk.utils.GlobalPreferences
+import java.time.Duration
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -17,8 +22,11 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import retrofit2.Response
 
 /** Push registration, the device's own push choice, app opens and `trackingUrl` reports ("Push", "Push reporting"). */
 @RunWith(RobolectricTestRunner::class)
@@ -197,11 +205,125 @@ internal class PushConformanceTest : KiroraTestBase() {
         assertEquals("https://api.kirora.io/t/p/abc", KiroraPushTracker.trusted(base, "/t/p/abc").toString())
         assertNull(KiroraPushTracker.trusted(base, "https://evil.example.com/t/p/abc"))
         assertNull(KiroraPushTracker.trusted(base, "https://api.kirora.io/other/path"))
+        assertNull(KiroraPushTracker.trusted(base, "https://user@api.kirora.io/t/p/abc"))
+        assertNull(KiroraPushTracker.trusted(base, "https://api.kirora.io/x/../t/p/abc"))
+        assertNull(KiroraPushTracker.trusted(base, "https://api.kirora.io/t/p/%2e%2e/admin"))
+        assertNull(KiroraPushTracker.trusted(base, "https://api.kirora.io/t/p/"))
+        assertNull(KiroraPushTracker.trusted(base, "http://api.kirora.io/t/p/abc"))
+    }
+
+    @Test
+    fun aTrackingUrlMayLieUnderTheApiUrlsPath() {
+        val base = "https://example.com/kirora/api/".toHttpUrl()
+        assertEquals(
+            "https://example.com/kirora/api/t/p/abc",
+            KiroraPushTracker.trusted(base, "https://example.com/kirora/api/t/p/abc").toString()
+        )
+        assertNull("outside the API's path", KiroraPushTracker.trusted(base, "https://example.com/t/p/abc"))
+        assertNull(KiroraPushTracker.trusted(base, "https://example.com/kirora/apix/t/p/abc"))
+        assertNull(KiroraPushTracker.trusted(base, "https://example.com/kirora/api/../other/t/p/abc"))
     }
 
     @Test
     fun theFcmTokenComesFromTheBridgeAndIsKept() = runBlocking {
         start(pushOptions).identify(token)
         assertEquals("fcm-1", GlobalPreferences(context).getPushToken())
+    }
+
+    // ---- Taps reach the app after their report, waiting 1.5 seconds at most ------------------
+
+    private fun tap(link: String) =
+        Robolectric.buildActivity(KiroraPushTrampolineActivity::class.java, tapIntent(link)).create()
+
+    private fun tapIntent(link: String): Intent = Intent(context, KiroraPushTrampolineActivity::class.java)
+        .putExtra("kirora", "true")
+        .putExtra("link", link)
+        .putExtra("trackingUrl", "https://api.kirora.io/t/p/tap-token")
+        .putExtra(KiroraPushTrampolineActivity.EXTRA_NOTIFICATION_ID, 0)
+
+    @Test
+    fun aTapReachesTheAppAfterItsReport() = runBlocking {
+        var routed: String? = null
+        start(KiroraOptions(trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
+        val release = CompletableDeferred<Unit>()
+        fake.trackingResponder = {
+            release.await()
+            Response.success(204, Unit)
+        }
+        tap("myapp://order/1")
+        waitUntil(message = "the report on its way") { fake.trackingReports.isNotEmpty() }
+        shadowOf(Looper.getMainLooper()).idle()
+        assertNull("waits for the report", routed)
+
+        release.complete(Unit)
+        waitUntilOnMain(message = "the link") { routed != null }
+        assertEquals("clicked", fake.trackingReports.single().second.event)
+    }
+
+    @Test
+    fun aTapWaitsAtMostOneAndAHalfSecondsForItsReport() = runBlocking {
+        var routed: String? = null
+        start(KiroraOptions(trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
+        fake.trackingResponder = { CompletableDeferred<Response<Unit>>().await() } // never answers
+        tap("myapp://order/1")
+        waitUntil(message = "the report on its way") { fake.trackingReports.isNotEmpty() }
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1_400))
+        assertNull(routed)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(200))
+        assertEquals("myapp://order/1", routed)
+    }
+
+    @Test
+    fun aTapStillReachesTheAppWhenTheTapScreenClosesDuringTheWait() = runBlocking {
+        var routed: String? = null
+        val taps = mutableListOf<Map<String, String>>()
+        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
+        kirora.addNotificationClickListener { taps += it }
+        fake.trackingResponder = { CompletableDeferred<Response<Unit>>().await() } // never answers
+        val screen = tap("myapp://order/1")
+        waitUntil(message = "the report on its way") { fake.trackingReports.isNotEmpty() }
+        shadowOf(Looper.getMainLooper()).idle()
+        assertNull(routed)
+
+        // Back, say, before the wait ends.
+        screen.pause().stop().destroy()
+        assertEquals("myapp://order/1", routed)
+        assertEquals(1, taps.size)
+        // The coroutine, cancelled, doesn't hand it over a second time.
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2_000))
+        assertEquals(1, taps.size)
+    }
+
+    @Test
+    fun aTapThatReopenedTheAppStillReachesItWhenTheClientIsDestroyedDuringTheWait() = runBlocking {
+        val taps = mutableListOf<Map<String, String>>()
+        val kirora = start(pushOptions)
+        kirora.addNotificationClickListener { taps += it }
+        fake.trackingResponder = { CompletableDeferred<Response<Unit>>().await() } // never answers
+        val intent = tapIntent("myapp://order/1")
+        assertTrue(kirora.pushManager!!.handleNotificationIntent(intent))
+        waitUntil(message = "the report on its way") { fake.trackingReports.isNotEmpty() }
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(taps.isEmpty())
+
+        kirora.destroy()
+        waitUntilOnMain(message = "the tap") { taps.isNotEmpty() }
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2_000))
+        assertEquals(1, taps.size)
+    }
+
+    @Test
+    fun aTapIsDeliveredAndReportedOnceWhenTheTapScreenResumes() = runBlocking {
+        val taps = mutableListOf<Map<String, String>>()
+        val kirora = start(pushOptions)
+        kirora.addNotificationClickListener { taps += it }
+        // Resumed, as on a device: the activity callbacks see the tap screen too.
+        Robolectric.buildActivity(KiroraPushTrampolineActivity::class.java, tapIntent("https://shop.example/sale"))
+            .create().start().resume()
+        waitUntilOnMain(message = "the tap") { taps.isNotEmpty() }
+        delay(200)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(1, taps.size)
+        assertEquals(listOf("clicked"), fake.trackingReports.map { it.second.event })
     }
 }

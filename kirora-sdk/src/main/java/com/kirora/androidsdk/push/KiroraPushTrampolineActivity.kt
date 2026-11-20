@@ -27,27 +27,69 @@ internal class KiroraPushTrampolineActivity : Activity() {
 
     private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** The tap being handled, until it has reached the app; then null. */
+    private var pending: Tap? = null
+
+    /** [clicked]: the tap follows a link or a button (`clicked`), rather than a plain `opened`. */
+    private class Tap(val data: Map<String, String>, val actionUrl: String?, val clicked: Boolean)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        var waiting = false
-        try {
-            waiting = processIntent(intent)
+        // Recreated (a configuration change): the first instance already handed the tap over.
+        if (savedInstanceState != null) {
+            finish()
+            return
+        }
+        val tap = try {
+            readTap(intent)
         } catch (e: Exception) {
             KiroraLogger.e("Error processing notification trampoline intent", e)
-        } finally {
-            if (!waiting) finish()
+            null
+        }
+        if (tap == null) {
+            finish()
+            return
+        }
+        pending = tap
+        // Stays (invisible) while the tap waits for its report and any wrapper's answer.
+        mainScope.launch {
+            try {
+                Kirora.awaitTapReport(Kirora.reportNotificationTap(applicationContext, tap.data["trackingUrl"], clicked = tap.clicked))
+                if (handOver()) open(tap)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                KiroraLogger.e("Error processing notification trampoline intent", e)
+            } finally {
+                finish()
+            }
         }
     }
 
     override fun onDestroy() {
+        // Gone before the wait ended (Back, or the system ended it): the tap reaches the app
+        // now, without the rest of the wait; the report goes on in the background.
+        val tap = pending
+        try {
+            if (tap != null && handOver()) openNow(applicationContext, tap.actionUrl)
+        } catch (e: Exception) {
+            KiroraLogger.e("Error processing notification trampoline intent", e)
+        }
         mainScope.cancel()
         super.onDestroy()
     }
 
-    /** True while a wrapper's deep-link callback is being asked: the activity stays until it answers. */
-    private fun processIntent(intent: Intent?): Boolean {
-        if (intent == null) return false
-        val extras = intent.extras ?: return false
+    /** Tells the app's listeners of the pending tap, once: false when it was already handed over. */
+    private fun handOver(): Boolean {
+        val tap = pending ?: return false
+        pending = null
+        Kirora.deliverNotificationTap(tap.data)
+        return true
+    }
+
+    private fun readTap(intent: Intent?): Tap? {
+        if (intent == null) return null
+        val extras = intent.extras ?: return null
 
         val data = mutableMapOf<String, String>()
         for (key in extras.keySet()) {
@@ -58,7 +100,6 @@ internal class KiroraPushTrampolineActivity : Activity() {
         val buttonUrl = extras.getString(EXTRA_BUTTON_URL)?.takeIf { it.isNotBlank() }
         // `link` is the push's `actionUrl` in Android's data-only payload.
         val actionUrl = buttonUrl ?: data["link"]?.takeIf { it.isNotBlank() }
-        val trackingUrl = data["trackingUrl"]
 
         // Buttons do not dismiss the notification by themselves.
         if (buttonIndex != null) {
@@ -67,15 +108,12 @@ internal class KiroraPushTrampolineActivity : Activity() {
                 extras.getInt(EXTRA_NOTIFICATION_ID, 0)
             )
         }
+        return Tap(data, actionUrl, clicked = buttonIndex != null || actionUrl != null)
+    }
 
-        // `opened` for a plain tap; `clicked` when the tap follows a link or a button.
-        Kirora.handleNotificationTap(
-            applicationContext,
-            data,
-            trackingUrl,
-            clicked = buttonIndex != null || actionUrl != null
-        )
-
+    /** Opens what the tap is for: its link (through the app's or a wrapper's handler), or the app. */
+    private suspend fun open(tap: Tap) {
+        val actionUrl = tap.actionUrl
         if (actionUrl != null && Kirora.active?.options?.handleDeepLink == null && openable(actionUrl) &&
             Kirora.awaitsWrapperCallbacks(applicationContext)
         ) {
@@ -83,42 +121,32 @@ internal class KiroraPushTrampolineActivity : Activity() {
             // app so its code runs, and hand the link over once it does (or after 10 seconds).
             launchApp(this)
             Kirora.openWhenWrapperReady(applicationContext, actionUrl)
-            return false
+            return
         }
 
         if (actionUrl != null) {
             val wrapper = Kirora.wrapperDeepLinkHandler
             if (Kirora.active?.options?.handleDeepLink == null && wrapper != null && openable(actionUrl)) {
-                // Asked across the wrapper's async bridge; the activity stays open (so it may still
-                // start one) until the answer, or 1.5 seconds without one.
-                mainScope.launch {
-                    val handled = withTimeoutOrNull(Kirora.WRAPPER_ANSWER_MS) {
-                        try {
-                            wrapper(actionUrl)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            KiroraLogger.e("Error in the wrapper's deep link handler", e)
-                            false
-                        }
-                    } ?: false
+                // Asked across the wrapper's async bridge, for 1.5 seconds at most.
+                val handled = withTimeoutOrNull(Kirora.WRAPPER_ANSWER_MS) {
                     try {
-                        val activity = this@KiroraPushTrampolineActivity
-                        when {
-                            // The app routed it, perhaps with no screen showing: bring it forward.
-                            handled -> bringAppForward(activity)
-                            !openAction(activity, actionUrl) -> launchApp(activity)
-                        }
-                    } finally {
-                        finish()
+                        wrapper(actionUrl)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        KiroraLogger.e("Error in the wrapper's deep link handler", e)
+                        false
                     }
+                } ?: false
+                when {
+                    // The app routed it, perhaps with no screen showing: bring it forward.
+                    handled -> bringAppForward(this)
+                    !openAction(this, actionUrl) -> launchApp(this)
                 }
-                return true
+                return
             }
-            if (openAction(this, actionUrl)) return false
         }
-        launchApp(this)
-        return false
+        openNow(this, actionUrl)
     }
 
     companion object {
@@ -185,6 +213,12 @@ internal class KiroraPushTrampolineActivity : Activity() {
             } catch (e: Exception) {
                 KiroraLogger.w("Could not bring the app forward", e)
             }
+        }
+
+        /** Opens [actionUrl] (through `handleDeepLink`, never asking a wrapper) or else the app, at once. */
+        internal fun openNow(context: Context, actionUrl: String?) {
+            if (actionUrl != null && openAction(context, actionUrl)) return
+            launchApp(context)
         }
 
         internal fun launchApp(context: Context) {

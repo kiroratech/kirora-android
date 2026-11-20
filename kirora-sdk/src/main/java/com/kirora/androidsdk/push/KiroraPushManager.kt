@@ -10,10 +10,12 @@ import androidx.core.content.ContextCompat
 import com.kirora.androidsdk.Kirora
 import com.kirora.androidsdk.identity.Identity
 import com.kirora.androidsdk.identity.SignedInUser
+import com.kirora.androidsdk.model.AuthFailureReason
 import com.kirora.androidsdk.model.KiroraApiError
 import com.kirora.androidsdk.model.KiroraPushOptions
 import com.kirora.androidsdk.model.PushPermission
 import com.kirora.androidsdk.model.PushStatus
+import com.kirora.androidsdk.model.UserTokenError
 import com.kirora.androidsdk.net.KiroraApiService
 import com.kirora.androidsdk.net.models.DeviceRegistrationRequest
 import com.kirora.androidsdk.net.models.PushApp
@@ -25,6 +27,8 @@ import com.kirora.androidsdk.utils.RegistrationDetails
 import com.kirora.androidsdk.utils.toApiError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -58,6 +62,8 @@ internal class KiroraPushManager(
     private val listeners: PushListeners = PushListeners(),
     private val bridge: KiroraPushBridge? = null,
     private val registrationDetails: () -> RegistrationDetails = { RegistrationDetails() },
+    /** A background token failure, with the token it concerns. */
+    private val onAuthFailure: (AuthFailureReason, SignedInUser) -> Unit = { _, _ -> },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     private val pushEnabled = pushOptions != null
@@ -106,6 +112,12 @@ internal class KiroraPushManager(
             register(user)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: UserTokenError) {
+            KiroraLogger.e("Push registration failed", e)
+            onAuthFailure(AuthFailureReason.FETCH_FAILED, user)
+        } catch (e: KiroraApiError) {
+            KiroraLogger.e("Push registration failed", e)
+            if (e.status == 401) onAuthFailure(AuthFailureReason.REFUSED, user)
         } catch (e: Exception) {
             KiroraLogger.e("Push registration failed", e)
         }
@@ -166,7 +178,7 @@ internal class KiroraPushManager(
         )
         val response = authorized(user) { apiService.registerDevice(installationId, request, it) }
         if (!response.isSuccessful) throw response.toApiError()
-        user.confirmed = true
+        user.accepted()
         // Saved even if the user changed meanwhile: it records who Kirora now has.
         preferences.setPushRegistration(
             PushRegistration(
@@ -500,7 +512,17 @@ internal class KiroraPushManager(
                 extras.get(key)?.let { data[key] = it.toString() }
             }
             intent.putExtra(HANDLED_EXTRA, true)
-            Kirora.handleNotificationTap(context, data, data["trackingUrl"], clicked = false)
+            val report = Kirora.reportNotificationTap(context, data["trackingUrl"], clicked = false)
+            // The intent is marked handled, so this is its only delivery: it happens even if the
+            // client is destroyed during the wait (cut short then). ATOMIC: runs even if cancelled
+            // before it starts, so the finally always delivers.
+            scope.launch(Dispatchers.Main.immediate, start = CoroutineStart.ATOMIC) {
+                try {
+                    Kirora.awaitTapReport(report)
+                } finally {
+                    Kirora.deliverNotificationTap(data)
+                }
+            }
             true
         } catch (e: Throwable) {
             // An intent from outside the app can carry extras that fail to unparcel.
@@ -510,6 +532,9 @@ internal class KiroraPushManager(
     }
 
     fun activityResumed(activity: Activity) {
+        // The tap screen reports and delivers its own taps; handling its intent here too would
+        // deliver each tap twice and report it as both `clicked` and `opened`.
+        if (activity is KiroraPushTrampolineActivity) return
         handleNotificationIntent(activity.intent)
     }
 

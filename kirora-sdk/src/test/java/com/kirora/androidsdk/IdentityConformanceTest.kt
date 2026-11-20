@@ -6,7 +6,10 @@ import com.kirora.androidsdk.model.KiroraPushOptions
 import com.kirora.androidsdk.model.UserTokenError
 import com.kirora.androidsdk.net.FakeKiroraApiService
 import com.kirora.androidsdk.utils.GlobalPreferences
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -245,5 +248,34 @@ internal class IdentityConformanceTest : KiroraTestBase() {
         val second = start(clearQueue = false)
         assertTrue(second.isIdentified)
         assertFalse(first.isInitialized)
+    }
+
+    @Test
+    fun identifyingTheSameUserAgainMidSendPostsEachEventOnce() = runBlocking {
+        val kirora = start()
+        kirora.identify(tokenA)
+        val release = CompletableDeferred<Unit>()
+        fake.batchResponder = { request, _ ->
+            if (fake.batchRequests.size == 1) release.await()
+            FakeKiroraApiService.accepted(request)
+        }
+        kirora.track("First")
+        kirora.waitQueued(1)
+        val firstFlush = launch(Dispatchers.Default) { kirora.flush() }
+        waitUntil(message = "the first batch on its way") { fake.batchRequests.size == 1 }
+
+        // Same user, new token, while that batch waits for its answer.
+        kirora.identify(jwt("user-a", nonce = "refreshed"))
+        kirora.track("Second")
+        kirora.waitQueued(2)
+        val secondFlush = launch(Dispatchers.Default) { kirora.flush() }
+        delay(200)
+        release.complete(Unit)
+        firstFlush.join()
+        secondFlush.join()
+        kirora.waitQueued(0)
+
+        assertEquals(2, fake.batchRequests.size)
+        assertEquals(listOf("First", "Second"), fake.sentEventNames)
     }
 }

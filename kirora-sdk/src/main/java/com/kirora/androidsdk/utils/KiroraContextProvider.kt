@@ -51,7 +51,7 @@ internal class KiroraContextProvider(
 
     /** The device's language as BCP 47, or null when it has none ("und") or can't be read. */
     private fun locale(): String? = try {
-        Locale.getDefault().toLanguageTag().takeIf { it.isNotBlank() && it != "und" }
+        localeTag(Locale.getDefault())
     } catch (_: Exception) {
         null
     }
@@ -87,5 +87,28 @@ internal class KiroraContextProvider(
         ScreenInfo(metrics.widthPixels, metrics.heightPixels, metrics.density)
     } catch (_: Exception) {
         ScreenInfo()
+    }
+
+    companion object {
+        /**
+         * Language, script and region only (`en-GB`, `zh-Hant-TW`): Android 14's regional
+         * preferences add `-u-…` extensions (first day of the week, units) that can make the full
+         * tag longer than the 35 characters the server takes. These three subtags are 17 at most.
+         * Null for `und`.
+         */
+        fun localeTag(locale: Locale): String? {
+            val tag = try {
+                Locale.Builder()
+                    .setLanguage(locale.language)
+                    .setScript(locale.script)
+                    .setRegion(locale.country)
+                    .build()
+                    .toLanguageTag()
+            } catch (_: Exception) {
+                // A legacy value Builder refuses (an odd region, say): the language alone.
+                Locale(locale.language).toLanguageTag()
+            }
+            return tag.takeIf { it.isNotBlank() && it != "und" }
+        }
     }
 }

@@ -4,10 +4,10 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
-import com.google.gson.JsonPrimitive
 import com.kirora.androidsdk.db.EventEntity
 import com.kirora.androidsdk.identity.Identity
 import com.kirora.androidsdk.identity.SignedInUser
+import com.kirora.androidsdk.model.AuthFailureReason
 import com.kirora.androidsdk.model.EventDropReason
 import com.kirora.androidsdk.model.KiroraApiError
 import com.kirora.androidsdk.model.UserTokenError
@@ -17,6 +17,8 @@ import com.kirora.androidsdk.utils.JsonSnapshot
 import com.kirora.androidsdk.utils.KiroraLogger
 import com.kirora.androidsdk.utils.data
 import com.kirora.androidsdk.utils.errorCode
+import com.kirora.androidsdk.utils.errorObject
+import com.kirora.androidsdk.utils.stringField
 import com.kirora.androidsdk.utils.toApiError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -39,6 +41,13 @@ import kotlin.random.Random
  * idempotency key. An event Kirora accepted, or refused for good, is removed; one with a missing,
  * repeated or unreadable result, or a refusal a later attempt may not get, waits for a retry with
  * its original payload and key.
+ *
+ * A refusal of the whole request drops events only when it is about them: a 413, or a 400 or 422
+ * that names the events, splits the batch until the bad event stands alone, and only that one is
+ * dropped. Anything else (a redirect, a 403, 404 or 409 from a wrong `apiUrl`, a captive portal
+ * or a proxy, a 400 about the headers) keeps every event and backs off. A 401 no fresh token
+ * resolves keeps them too: retried after a backoff with `fetchUserToken`, and otherwise held
+ * until identify() gives a new token.
  */
 internal class KiroraBatchManager(
     private val store: EventStore,
@@ -49,6 +58,8 @@ internal class KiroraBatchManager(
     /** A sign-in whose token Kirora refused before ever accepting it gives back the events it adopted. */
     private val onTokenRefused: (SignedInUser) -> Unit = {},
     private val onDropped: (count: Int, reason: EventDropReason) -> Unit = { _, _ -> },
+    /** A background token failure, with the token it concerns. */
+    private val onAuthFailure: (AuthFailureReason, SignedInUser) -> Unit = { _, _ -> },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     private val sendMutex = Mutex()
@@ -65,11 +76,19 @@ internal class KiroraBatchManager(
     @Volatile
     private var delayFromServer = false
 
+    /**
+     * The token Kirora last refused when no fresh one could be had. While the signed-in user still
+     * has it, sending waits out the backoff; a new token from identify() sends at once.
+     */
     @Volatile
-    private var destroyed = false
+    private var refusedToken: String? = null
+
+    /** Paused with no retry timer: the token was refused and there is no fetchUserToken to replace it. */
+    private val waitingForToken: Boolean
+        get() = refusedToken != null && !identity.canRefresh
 
     @Volatile
-    private var consecutiveAuthFailures = 0
+    private var destroyed = false
 
     private var timer: Job? = null
     private var timerAt = 0L
@@ -150,7 +169,8 @@ internal class KiroraBatchManager(
 
     /** Back online: our own backoff no longer applies; the server's `Retry-After` still does. */
     fun onNetworkAvailable() {
-        if (!delayFromServer) {
+        // A refused token is no better for being back online.
+        if (!delayFromServer && refusedToken == null) {
             retryDelayMs = FIRST_RETRY_MS
             notBefore = 0L
         }
@@ -159,11 +179,21 @@ internal class KiroraBatchManager(
 
     private suspend fun sendCurrent(waiveBackoff: Boolean) {
         if (destroyed) return
-        if (clock() < notBefore && (delayFromServer || !waiveBackoff)) {
+        val user = identity.user
+        // Backing off after a refused token: a different token is worth trying at once.
+        val newToken = refusedToken != null && user != null && user.token != refusedToken
+        // Only a new token (or the app's own flush()) ends this pause; nothing is scheduled meanwhile.
+        if (waitingForToken && !newToken && !waiveBackoff) return
+        if (clock() < notBefore && (delayFromServer || !(waiveBackoff || newToken))) {
             schedule(notBefore)
             return
         }
-        val user = identity.user ?: return
+        user ?: return
+        if (newToken) {
+            // Used up now: if the new token's attempt fails another way, its own backoff applies.
+            refusedToken = null
+            retryDelayMs = FIRST_RETRY_MS
+        }
         deliver(user, refreshAllowed = true) { identity.user === user && !destroyed && trackingAllowed() }
     }
 
@@ -212,23 +242,33 @@ internal class KiroraBatchManager(
     private suspend fun sendBatch(user: SignedInUser, batch: List<EventEntity>, refreshAllowed: Boolean): Outcome {
         val keys = batch.mapTo(LinkedHashSet()) { it.idempotencyKey }
         val token = user.token
+        // The token this request was last sent with: identify() may change the user's meanwhile.
+        var sentWith = token
         var response = post(batch, token) ?: return Outcome.Stop
         if (response.code() == 401 && refreshAllowed) {
             val fresh = try {
                 identity.refresh(user, token)
             } catch (e: UserTokenError) {
                 KiroraLogger.e(e.message ?: "fetchUserToken failed", e.cause)
+                onAuthFailure(AuthFailureReason.FETCH_FAILED, user)
                 retryLater(null)
                 return Outcome.Stop
             }
-            if (fresh != null && fresh != token) response = post(batch, fresh) ?: return Outcome.Stop
+            if (fresh != null && fresh != token) {
+                sentWith = fresh
+                response = post(batch, fresh) ?: return Outcome.Stop
+            }
+            // A fresh token refused, or none to try (no fetchUserToken, or one for someone else).
+            // Not for a token identify() has replaced meanwhile.
+            if (response.code() == 401 && user.token == sentWith) onAuthFailure(AuthFailureReason.REFUSED, user)
         }
         if (response.isSuccessful) {
-            user.confirmed = true
-            consecutiveAuthFailures = 0
+            user.accepted()
+            refusedToken = null
             return Outcome.Settled(acknowledged(response.body(), keys))
         }
-        return classifyFailure(response.toApiError(), keys, user)
+        val body = response.errorObject()
+        return classifyFailure(response.toApiError(body), body, keys, user, sentWith)
     }
 
     /** Null after a network failure, which has already scheduled a retry. `sentAt` is new for every attempt. */
@@ -242,7 +282,8 @@ internal class KiroraBatchManager(
         null
     }
 
-    private fun classifyFailure(error: KiroraApiError, keys: Set<String>, user: SignedInUser): Outcome {
+    private fun classifyFailure(error: KiroraApiError, body: JsonObject?, keys: Set<String>, user: SignedInUser, sentWith: String): Outcome {
+        val described = "HTTP ${error.status}${error.code?.let { " $it" } ?: ""}"
         if (error.retryable) {
             retryLater(error)
             return Outcome.Stop
@@ -250,16 +291,27 @@ internal class KiroraBatchManager(
         if (error.status == 401) {
             KiroraLogger.e("Events not sent: Kirora refused the user token")
             onTokenRefused(user)
-            if (++consecutiveAuthFailures == AUTH_FAILURES_BEFORE_REPORT) {
-                KiroraLogger.e("Kirora keeps refusing the user token; call identify() again.")
-            }
-            // Worth trying again only if a fresh token can be asked for.
-            if (identity.canRefresh) retryLater(null)
+            // Kept, and never sent again with this token on our own. With fetchUserToken, retried
+            // after a backoff, asking for a fresh token then. Without, paused until identify()
+            // gives a new token: the refused one would only be refused again.
+            refusedToken = sentWith
+            if (identity.canRefresh) retryLater(null) else stopTimer()
             return Outcome.Stop
         }
-        // Too large or invalid: halve until the bad event stands alone, so the rest still go.
-        if (error.status in SPLIT_STATUSES && keys.size > 1) return Outcome.Split
-        KiroraLogger.e("${keys.size} events dropped: Kirora refused them (HTTP ${error.status}${error.code?.let { " $it" } ?: ""})")
+        if (error.status == 403 && error.code == PLAN_FEATURE_UNAVAILABLE) return drop(keys, described)
+        if (error.status in SPLIT_STATUSES && (error.status == 413 || aboutTheEvents(body))) {
+            // Too large or invalid: halve until the bad event stands alone, so the rest still go.
+            return if (keys.size > 1) Outcome.Split else drop(keys, described)
+        }
+        // Never a refusal of these events: /events/batch answers none of these for a whole
+        // request, so it is a wrong apiUrl, a captive portal, a proxy, or a header Kirora refused.
+        KiroraLogger.e("Events not sent, kept for a retry: Kirora's address answered $described. Check apiUrl.")
+        retryLater(error)
+        return Outcome.Stop
+    }
+
+    private fun drop(keys: Set<String>, described: String): Outcome {
+        KiroraLogger.e("${keys.size} events dropped: Kirora refused them ($described)")
         onDropped(keys.size, EventDropReason.REJECTED)
         return Outcome.Settled(keys)
     }
@@ -274,7 +326,7 @@ internal class KiroraBatchManager(
         val repeated = HashSet<String>()
         for (element in results) {
             val result = element as? JsonObject ?: continue
-            val key = (result.get("idempotencyKey") as? JsonPrimitive)?.takeIf { it.isString }?.asString ?: continue
+            val key = result.stringField("idempotencyKey") ?: continue
             if (key !in keys) continue
             if (answers.containsKey(key)) repeated.add(key)
             // Either `{ error: { code } }` or `{ event: { … } }`; anything else is unreadable,
@@ -314,6 +366,7 @@ internal class KiroraBatchManager(
     }
 
     private fun resetBackoff() {
+        refusedToken = null
         retryDelayMs = FIRST_RETRY_MS
         notBefore = 0L
         delayFromServer = false
@@ -370,8 +423,23 @@ internal class KiroraBatchManager(
         private const val FIRST_RETRY_MS = 30_000L
         private const val MAX_RETRY_MS = 300_000L
         private const val JITTER = 0.1
-        private const val AUTH_FAILURES_BEFORE_REPORT = 3
         private val SPLIT_STATUSES = setOf(400, 413, 422)
+        private const val PLAN_FEATURE_UNAVAILABLE = "PLAN_FEATURE_UNAVAILABLE"
+
+        /**
+         * Whether a whole-request 400 or 422 may be caused by one of the events, so splitting can
+         * isolate it: only when Kirora's `error.errors` lists a problem in the body (`in: body`).
+         * Anything else is a problem with the request, kept and retried (sdk-interface.md): no
+         * list (a proxy's or captive portal's page, say), or problems only in the headers, query
+         * or path, such as a refused `Kirora-SDK` header.
+         */
+        internal fun aboutTheEvents(body: JsonObject?): Boolean {
+            val errors = (body?.get("error") as? JsonObject)?.get("errors") as? JsonArray ?: return false
+            return errors.any { entry ->
+                (entry as? JsonObject)?.stringField("in") == "body"
+            }
+        }
+
         private val RETRYABLE_EVENT_CODES = setOf("RATE_LIMITED", "INTERNAL_ERROR", "SERVICE_UNAVAILABLE")
 
         /** As many events as fit in [MAX_BATCH_BYTES], but always at least one. */

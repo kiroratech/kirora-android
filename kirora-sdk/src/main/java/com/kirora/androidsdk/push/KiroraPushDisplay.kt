@@ -4,17 +4,21 @@ import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.os.Looper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.kirora.androidsdk.Kirora
@@ -61,6 +65,10 @@ internal object KiroraPushDisplay {
     )
 
     private const val IMAGE_TIMEOUT_MS = 3_000
+    /** For the whole download, redirects included. */
+    private const val IMAGE_TOTAL_MS = 5_000L
+    private const val IMAGE_MAX_REDIRECTS = 3
+    private val REDIRECT_STATUSES = setOf(301, 302, 303, 307, 308)
     private const val IMAGE_MAX_BYTES = 5 * 1024 * 1024
     private const val IMAGE_MAX_EDGE = 1024
 
@@ -172,13 +180,22 @@ internal object KiroraPushDisplay {
             .setContentText(body)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setContentIntent(tapIntent(context, data, notificationId, tag, null))
+        // From Android 8 the channel decides the sound; before, the push's own `sound` applies.
+        val sound = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) soundUri(context, data["sound"]) else null
+        builder.setDefaults(
+            if (sound != null) NotificationCompat.DEFAULT_ALL and NotificationCompat.DEFAULT_SOUND.inv() else NotificationCompat.DEFAULT_ALL
+        )
+        sound?.let(builder::setSound)
         accentColor(context, config)?.let { builder.setColor(it) }
 
-        data["image"]?.let { url -> downloadImage(url) }?.let { bitmap ->
+        val picture = data["image"]?.let { url -> downloadImage(url) }
+        if (picture != null) {
             builder.setLargeIcon(null as Bitmap?)
-            builder.setStyle(NotificationCompat.BigPictureStyle().bigPicture(bitmap).bigLargeIcon(null as Bitmap?))
+            builder.setStyle(NotificationCompat.BigPictureStyle().bigPicture(picture).bigLargeIcon(null as Bitmap?))
+        } else if (!body.isNullOrBlank()) {
+            // Expandable, so a long body is read in full rather than cut to one line.
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(body))
         }
 
         parseButtonsJson(data["buttons"].orEmpty()).take(MAX_BUTTONS).forEachIndexed { index, button ->
@@ -256,25 +273,62 @@ internal object KiroraPushDisplay {
         null
     }
 
-    /** https only, a few seconds, a few MB; the push is shown without the picture when any of it fails. */
+    /**
+     * The app's raw resource named by a push's `sound` (`chime` or `chime.mp3` for `res/raw/chime.mp3`),
+     * or null for none, `default`, or a name the app doesn't have, which keep the default sound.
+     */
+    // A push names its sound as text, so the resource can only be found by name.
+    @SuppressLint("DiscouragedApi")
+    internal fun soundUri(context: Context, sound: String?): Uri? {
+        val name = sound?.trim()?.substringBeforeLast('.')?.takeIf { it.isNotEmpty() && it != "default" } ?: return null
+        val id = try {
+            context.resources.getIdentifier(name, "raw", context.packageName)
+        } catch (_: Exception) {
+            0
+        }
+        if (id == 0) {
+            KiroraLogger.w("No raw resource named '$name' for the push sound; using the default sound.")
+            return null
+        }
+        return "${ContentResolver.SCHEME_ANDROID_RESOURCE}://${context.packageName}/$id".toUri()
+    }
+
+    /**
+     * https only, following up to [IMAGE_MAX_REDIRECTS] https redirects (a CDN, a link shortener),
+     * a few seconds in all, a few MB; the push is shown without the picture when any of it fails.
+     */
     private fun downloadImage(urlText: String): Bitmap? {
-        if (!urlText.startsWith("https://", ignoreCase = true)) return null
+        val deadline = SystemClock.elapsedRealtime() + IMAGE_TOTAL_MS
+        var url = urlText
         var connection: HttpURLConnection? = null
         return try {
-            connection = (URL(urlText).openConnection() as HttpURLConnection).apply {
-                connectTimeout = IMAGE_TIMEOUT_MS
-                readTimeout = IMAGE_TIMEOUT_MS
-                instanceFollowRedirects = false
+            var hops = 0
+            while (true) {
+                if (!url.startsWith("https://", ignoreCase = true)) return null
+                val left = remaining(deadline) ?: return null
+                connection?.disconnect()
+                connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = minOf(IMAGE_TIMEOUT_MS, left)
+                    readTimeout = minOf(IMAGE_TIMEOUT_MS, left)
+                    // Followed by hand: HttpURLConnection would also follow one to plain http.
+                    instanceFollowRedirects = false
+                }
+                val status = connection.responseCode
+                if (status == 200) break
+                if (status !in REDIRECT_STATUSES || ++hops > IMAGE_MAX_REDIRECTS) return null
+                val location = connection.getHeaderField("Location") ?: return null
+                url = URL(URL(url), location).toString()
             }
-            if (connection.responseCode != 200) return null
+            val open = connection ?: return null
             val bytes = ByteArrayOutputStream()
-            connection.inputStream.use { input ->
+            open.inputStream.use { input ->
                 val buffer = ByteArray(8192)
                 while (true) {
                     val read = input.read(buffer)
                     if (read < 0) break
                     bytes.write(buffer, 0, read)
                     if (bytes.size() > IMAGE_MAX_BYTES) return null
+                    if (remaining(deadline) == null) return null
                 }
             }
             decodeSampled(bytes.toByteArray())
@@ -285,6 +339,10 @@ internal object KiroraPushDisplay {
             connection?.disconnect()
         }
     }
+
+    /** Milliseconds left before [deadline], or null once it has passed. */
+    private fun remaining(deadline: Long): Int? =
+        (deadline - SystemClock.elapsedRealtime()).takeIf { it > 0 }?.toInt()
 
     private fun decodeSampled(bytes: ByteArray): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

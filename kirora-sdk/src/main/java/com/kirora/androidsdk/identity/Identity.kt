@@ -1,5 +1,6 @@
 package com.kirora.androidsdk.identity
 
+import com.kirora.androidsdk.model.AuthFailureReason
 import com.kirora.androidsdk.model.UserTokenError
 import com.kirora.androidsdk.utils.JwtClaims
 import kotlinx.coroutines.CancellationException
@@ -33,6 +34,25 @@ internal class SignedInUser(
     /** Set once Kirora has accepted a call with this user's token. */
     @Volatile
     var confirmed: Boolean = false
+
+    /**
+     * The token the app was last told failed in the background, or null. Told again only after
+     * [accepted] or a new identify(): once per failure, not per retry or per fresh token.
+     */
+    @Volatile
+    var authFailureReportedFor: String? = null
+
+    /** identify() calls still running for this user; a background failure waits for them, as identify() may throw it. */
+    var signingIn: Int = 0
+
+    /** A background failure held while [signingIn]. */
+    var heldAuthFailure: AuthFailureReason? = null
+
+    /** Kirora accepted a call with this user's token. */
+    fun accepted() {
+        confirmed = true
+        authFailureReportedFor = null
+    }
 
     val authorization: String
         get() = "Bearer $token"

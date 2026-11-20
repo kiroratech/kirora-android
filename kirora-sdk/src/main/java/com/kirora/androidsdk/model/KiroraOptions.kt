@@ -40,7 +40,15 @@ public class KiroraOptions @JvmOverloads constructor(
      * custom scheme of this app in the app, anything else with the system. Runs on the main thread.
      * Never called for blocked schemes (`javascript`, `file`, `content`, `intent`, `data`).
      */
-    public val handleDeepLink: ((url: String) -> Boolean)? = null
+    public val handleDeepLink: ((url: String) -> Boolean)? = null,
+    /**
+     * Called when Kirora can't keep the signed-in user authenticated in the background: a token
+     * refresh failed ([AuthFailureReason.FETCH_FAILED]) or Kirora refused the token
+     * ([AuthFailureReason.REFUSED]). Never for a failure `identify()` already throws. Events stay
+     * queued; sign the user in again with `identify()`. Runs on the main thread, once per failure:
+     * again only after a call with the user's token has succeeded or `identify()` was called.
+     */
+    public val onAuthenticationFailed: ((reason: AuthFailureReason) -> Unit)? = null
 ) {
     internal fun withClientKey(key: String) = KiroraOptions(
         clientKey = key,
@@ -52,7 +60,8 @@ public class KiroraOptions @JvmOverloads constructor(
         logLevel = logLevel,
         apiUrl = apiUrl,
         beforeSend = beforeSend,
-        handleDeepLink = handleDeepLink
+        handleDeepLink = handleDeepLink,
+        onAuthenticationFailed = onAuthenticationFailed
     )
 }
 

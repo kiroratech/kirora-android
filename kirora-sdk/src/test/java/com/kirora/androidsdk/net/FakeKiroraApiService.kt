@@ -34,7 +34,7 @@ internal open class FakeKiroraApiService : KiroraApiService {
     @Volatile var deviceResponder: (suspend (DeviceRegistrationRequest) -> Response<DataEnvelope<DeviceAnswer>>)? = null
     @Volatile var deleteResponder: (suspend () -> Response<Unit>)? = null
     @Volatile var appOpenResponder: (() -> Response<Unit>)? = null
-    @Volatile var trackingResponder: (() -> Response<Unit>)? = null
+    @Volatile var trackingResponder: (suspend () -> Response<Unit>)? = null
     @Volatile var consentResponder: (() -> Response<Unit>)? = null
     @Volatile var pushApp: PushApp? = PushApp(pushAppId = "11111111-1111-1111-1111-111111111111", name = "Android", targetKind = "fcm_token")
 
@@ -108,8 +108,12 @@ internal open class FakeKiroraApiService : KiroraApiService {
             return Response.success(body)
         }
 
-        fun <T> error(status: Int, code: String = "ERROR", retryAfterSeconds: Long? = null): Response<T> {
-            val body = """{"error":{"code":"$code","message":"x"}}""".toResponseBody("application/json".toMediaType())
+        fun <T> error(status: Int, code: String = "ERROR", retryAfterSeconds: Long? = null): Response<T> =
+            errorWithBody(status, """{"error":{"code":"$code","message":"x"}}""", retryAfterSeconds)
+
+        /** An answer of [status] with [json] as its error body. */
+        fun <T> errorWithBody(status: Int, json: String, retryAfterSeconds: Long? = null): Response<T> {
+            val body = json.toResponseBody("application/json".toMediaType())
             val raw = okhttp3.Response.Builder()
                 .code(status)
                 .message("x")

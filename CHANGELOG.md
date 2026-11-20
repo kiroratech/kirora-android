@@ -5,7 +5,7 @@ need to do anything to upgrade.
 
 ## Unreleased
 
-### Fixed (from the 17 November review, docs/review.md)
+### Fixed
 - **Event context** matches Kirora's event schema of 17 November: `sessionId`, `locale`, `timezone`,
   `device` (`id`, `manufacturer`, `type: "android"`), `app`, `os`, `screen` and `library`, read when
   the event is tracked. The device model and network details (Wi-Fi, cellular, carrier) are no longer
@@ -32,9 +32,19 @@ need to do anything to upgrade.
 
 ### Removed (not in the shared SDK interface)
 - `KiroraOptions.tokenRefreshLeadSeconds`: a token is always refreshed 60 seconds before it expires.
-- `KiroraOptions.onEventsDropped`, `KiroraOptions.onAuthenticationFailed` and `Kirora.droppedEventCount`
-  (with `EventDropReason` and `AuthFailureReason`), held back from 0.1.0 until the shared interface
-  decides on them for every SDK; both cases are logged. **Action:** remove these options if you set them.
+- `KiroraOptions.onEventsDropped` and `Kirora.droppedEventCount` (with `EventDropReason`): not in the
+  shared interface; dropped events are logged. **Action:** remove the option if you set it.
+
+### Changed (shared interface, 17 November)
+- **`onAuthenticationFailed(reason)`**, now in every SDK: called on the main thread when the user can't
+  stay authenticated in the background. `AuthFailureReason.FETCH_FAILED` when `fetchUserToken` threw or
+  timed out; `REFUSED` when Kirora answered 401 to a fresh token, or there was none to try. Once per
+  failure, again only after Kirora accepts the user's token or `identify()` is called; never for a
+  failure `identify()` throws, nor for a user signing out. **Action:** change `{ … }` to
+  `{ reason -> … }` if you set the earlier, reason-less version.
+- **Taps reach the app after their report**, waiting 1.5 seconds at most: the link, `handleDeepLink`,
+  and tap listeners hear of a tap once its `opened`/`clicked` report has been answered, or after 1.5
+  seconds, with the report carrying on in the background.
 - `android-sdk-push` now exposes Firebase Messaging as an `api` dependency. `KiroraPush.handleMessage`
   takes a `RemoteMessage`, so apps previously had to add `firebase-messaging` themselves to compile.
   **No action required.**
@@ -99,8 +109,9 @@ need to do anything to upgrade.
   readable: nothing is collected. A diagnostic is logged in each case.
   The choice in effect is held in memory (no disk read per event) and saved off the caller's thread,
   in order; a refusal is written to its own copy first and a grant clears that copy first, so a
-  crash between the two writes never turns one answer into the other. A missing copy of a refusal
-  is written back at start.
+  crash between the two writes never turns one answer into the other. Only `setTrackingConsent`
+  writes either copy: nothing is repaired on start or on a check, since a repair made in the middle
+  of a grant (another process starting, say) would undo the grant for good.
 - `Kirora.wrapperDetached()` (internal API) for a wrapper's engine teardown. A deep link the app's
   handler takes brings the app forward; a launch tap's link that becomes ready in the background
   opens when the app returns. `setPushConsent` on a destroyed client throws, overlapping calls run one

@@ -4,7 +4,6 @@ import com.google.gson.Gson
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.kirora.androidsdk.db.EventEntity
-import com.kirora.androidsdk.model.BeforeSendEvent
 import com.kirora.androidsdk.model.KiroraOptions
 import com.kirora.androidsdk.net.EventStore
 import com.kirora.androidsdk.net.FakeKiroraApiService
@@ -27,11 +26,6 @@ import java.util.UUID
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 internal class DeliveryConformanceTest : KiroraTestBase() {
-    private val token = jwt("user-a")
-
-    private suspend fun signedIn(options: KiroraOptions = KiroraOptions(trackSessions = false)): Kirora =
-        start(options).also { it.identify(token) }
-
     @Test
     fun theBatchBodyKeepsTheWireShape() = runBlocking {
         val kirora = signedIn()

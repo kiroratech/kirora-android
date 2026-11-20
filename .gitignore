@@ -18,3 +18,4 @@ local.properties
 .kotlin/
 # Firebase config (project keys)
 google-services.json
+/.idea/

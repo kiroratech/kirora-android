@@ -6,6 +6,7 @@ import com.kirora.androidsdk.utils.KiroraNamespace
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeFalse
 import org.junit.Test
@@ -42,17 +43,21 @@ internal class ConsentStorageTest : KiroraTestBase() {
         mainStore.edit().clear().commit()
         assertFalse(start(optional, clearQueue = false).trackingConsent)
         saved()
-        assertEquals("written back to the main store", "refused", mainStore.getString("tracking_consent", null))
+        assertNull("read only: nothing is rebuilt on start", mainStore.getString("tracking_consent", null))
     }
 
     @Test
-    fun aLostRefusalCopyIsWrittenBackFromTheMainStore() {
+    fun aStartNeverRepairsACopyAGrantMayBeClearing() {
+        // Mid-grant in another process: the refusal copy is cleared, "granted" not yet recorded.
         start(optional).setTrackingConsent(false)
         saved()
         refusalCopy.delete()
-        assertFalse(start(optional, clearQueue = false).trackingConsent)
+        assertFalse("the main store's refusal still holds", start(optional, clearQueue = false).trackingConsent)
         saved()
-        assertTrue(refusalCopy.exists())
+        assertFalse("no copy written back", refusalCopy.exists())
+        // The grant lands: it is not undone by a copy a start put back.
+        mainStore.edit().putString("tracking_consent", "granted").commit()
+        assertTrue(start(optional, clearQueue = false).trackingConsent)
     }
 
     @Test

@@ -40,7 +40,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 
-/** Regression tests for the findings in docs/review.md (A01–A09). */
+/** Regression tests for event context, logout, storage failures, retries and client replacement. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 internal class ReviewFindingsTest : KiroraTestBase() {
@@ -56,7 +56,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         db?.close()
     }
 
-    // ---- A01: event context (the server's schema of 17 November, mobile fields included) ------------------------------------------------------------------
+    // ---- event context (the server's schema of 17 November, mobile fields included) ------------------------------------------------------------------
 
     @Test
     fun eventContextHoldsOnlyFieldsTheServerAccepts() = runBlocking {
@@ -107,7 +107,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertEquals("en-GB", second.context.asJsonObject.get("locale").asString)
     }
 
-    // ---- A02: logout boundary ----------------------------------------------------------------
+    // ---- logout boundary ----------------------------------------------------------------
 
     @Test
     fun eventsTrackedWhileLogoutRunsWaitForTheNextUser() = runBlocking {
@@ -137,7 +137,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertEquals("Bearer $tokenB", fake.batchAuthorizations.last())
     }
 
-    // ---- A03: detach after a registration under way --------------------------------------------
+    // ---- detach after a registration under way --------------------------------------------
 
     @Test
     fun aDetachWaitsForATokenRefreshRegistrationAndNamesIt() = runBlocking {
@@ -180,7 +180,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertEquals("2026-11-17T09:00:00.000Z", fake.deletionLastSeenAt.single())
     }
 
-    // ---- A04 and A06: storage that fails part of the time -----------------------------------------
+    // ---- storage that fails part of the time -----------------------------------------
 
     /** Room's DAO, with writes or reads made to fail on demand. */
     private class FlakyDao(private val real: EventDao) : EventDao by real {
@@ -292,7 +292,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertEquals(listOf(1_000L, 2_000L, 3_000L), store.oldestFor("user-a", 10).map { it.occurredAt })
     }
 
-    // ---- A05: per-event results ----------------------------------------------------------------
+    // ---- per-event results ----------------------------------------------------------------
 
     @Test
     fun malformedResultsAcknowledgeNothing() = runBlocking {
@@ -322,7 +322,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertEquals("all kept for a retry with their keys", 4, kirora.queued())
     }
 
-    // ---- A07: Retry-After --------------------------------------------------------------------
+    // ---- Retry-After --------------------------------------------------------------------
 
     @Test
     fun retryAfterKeepsTheServersWholeWait() {
@@ -349,7 +349,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertEquals("nothing sent before Retry-After", 1, fake.batchRequests.size)
     }
 
-    // ---- A08: replacement clients ----------------------------------------------------------------
+    // ---- replacement clients ----------------------------------------------------------------
 
     @Test
     fun aClientForAnotherWorkspaceOrApiStartsSignedOut() = runBlocking {
@@ -369,7 +369,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertTrue("the same workspace keeps its user", start(clearQueue = false).isIdentified)
     }
 
-    // ---- A09: app-open spacing -----------------------------------------------------------------
+    // ---- app-open spacing -----------------------------------------------------------------
 
     @Test
     fun withSessionsOffTheAppOpenSpacingIsNotStored() = runBlocking {

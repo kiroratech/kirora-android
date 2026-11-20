@@ -50,6 +50,10 @@ internal abstract class KiroraTestBase {
         return kirora
     }
 
+    /** A client with user-a signed in. */
+    protected suspend fun signedIn(options: KiroraOptions = KiroraOptions(trackSessions = false)): Kirora =
+        start(options).also { it.identify(jwt("user-a")) }
+
     protected suspend fun Kirora.queued(): Int = databaseForTesting!!.eventDao().getCount()
 
     protected suspend fun Kirora.waitQueued(n: Int) = waitUntil(message = "$n queued events") { queued() == n }

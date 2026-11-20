@@ -6,13 +6,15 @@ import com.kirora.androidsdk.net.KiroraApiService
 import com.kirora.androidsdk.net.models.PushTrackingRequest
 import com.kirora.androidsdk.utils.GlobalPreferences
 import com.kirora.androidsdk.utils.KiroraLogger
+import com.kirora.androidsdk.utils.RetryAfter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import com.kirora.androidsdk.utils.RetryAfter
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -42,28 +44,47 @@ internal object KiroraPushTracker {
     private const val MAX_RETRY_DELAY_MS = 60_000L
 
     const val DELIVERED = "delivered"
+    /** Answered at once: nothing to report, so nothing to wait for. */
+    private val DONE: Deferred<Unit> = CompletableDeferred(Unit)
+
     const val OPENED = "opened"
     const val CLICKED = "clicked"
 
-    /** Reports [event] for the push whose `trackingUrl` is [trackingUrl]. A push without one reports nothing. */
-    fun report(context: Context, apiUrl: String?, trackingUrl: String?, event: String, api: KiroraApiService? = null) {
-        if (trackingUrl.isNullOrBlank()) return
+    /**
+     * Reports [event] for the push whose `trackingUrl` is [trackingUrl]. A push without one reports
+     * nothing. The answer completes when the first attempt has ended (a tap waits for that, at
+     * most 1.5 seconds); a retry goes on after it, in the background.
+     */
+    fun report(context: Context, apiUrl: String?, trackingUrl: String?, event: String, api: KiroraApiService? = null): Deferred<Unit> {
+        if (trackingUrl.isNullOrBlank()) return DONE
         val app = context.applicationContext
-        val base = baseUrl(app, apiUrl) ?: return
+        val base = baseUrl(app, apiUrl) ?: return DONE
         val url = trusted(base, trackingUrl)
         if (url == null) {
             KiroraLogger.w("Ignoring a push trackingUrl that is not on the Kirora API host.")
-            return
+            return DONE
         }
         // The first of each counts and a repeat changes nothing, so a repeat isn't sent.
         synchronized(reported) {
-            if (!reported.add("$event $url")) return
+            if (!reported.add("$event $url")) return DONE
             while (reported.size > REMEMBERED) reported.remove(reported.first())
         }
+        val firstAttempt = CompletableDeferred<Unit>()
         scope.launch {
-            val service = api ?: client(base)
-            val first = send(service, url.toString(), event)
-            if (first !is Outcome.Retry) return@launch
+            var service: KiroraApiService? = null
+            val first = try {
+                // Inside the try: a client that can't be built must not keep a tap waiting.
+                service = api ?: client(base)
+                send(service, url.toString(), event)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                KiroraLogger.w("Could not report the push $event", e)
+                null
+            } finally {
+                firstAttempt.complete(Unit)
+            }
+            if (first !is Outcome.Retry || service == null) return@launch
             // Once more, after a pause and never sooner than Retry-After, then dropped. A report
             // that would have to wait longer than a minute is dropped now, not sent early.
             val wait = maxOf(first.retryAfterMs ?: 0L, RETRY_DELAY_MS)
@@ -76,6 +97,7 @@ internal object KiroraPushTracker {
                 KiroraLogger.d("Push $event report dropped after one retry.")
             }
         }
+        return firstAttempt
     }
 
     private sealed class Outcome {
@@ -112,13 +134,28 @@ internal object KiroraPushTracker {
         return KiroraApiClient.create(key, { "" }, { null }).also { sharedClient = key to it }
     }
 
-    /** The tracking URL itself, only when it is a `/t/p/…` URL on Kirora's own API host. */
+    /**
+     * The tracking URL itself, only when it begins with the configured API URL followed by `/t/p/`
+     * (same scheme, host and port, under the API URL's own path when it has one), with no user
+     * info and no `.` or `..` segments, which could step out of that path.
+     */
     fun trusted(base: HttpUrl, trackingUrl: String): HttpUrl? {
+        // Checked on the text: parsing quietly resolves dot segments.
+        if (hasDotSegment(trackingUrl)) return null
         val resolved = base.resolve(trackingUrl) ?: return null
         if (resolved.scheme != base.scheme || resolved.host != base.host || resolved.port != base.port) return null
-        if (!resolved.encodedPath.startsWith("/t/p/")) return null
+        if (resolved.username.isNotEmpty() || resolved.password.isNotEmpty()) return null
+        val prefix = base.encodedPath.trimEnd('/') + "/t/p/"
+        if (!resolved.encodedPath.startsWith(prefix) || resolved.encodedPath.length == prefix.length) return null
         return resolved
     }
+
+    /** A `.` or `..` segment, written plainly or percent-encoded (`%2e`). A host of `.` fails the host check anyway. */
+    private fun hasDotSegment(url: String): Boolean =
+        url.substringBefore('?').substringBefore('#').split('/').any { segment ->
+            val plain = segment.replace("%2e", ".", ignoreCase = true)
+            plain == "." || plain == ".."
+        }
 
     internal fun resetForTesting() {
         scope.cancel()

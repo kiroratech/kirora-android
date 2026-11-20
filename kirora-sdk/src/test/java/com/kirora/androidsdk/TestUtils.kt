@@ -1,7 +1,9 @@
 package com.kirora.androidsdk
 
+import android.os.Looper
 import kotlinx.coroutines.delay
 import org.junit.Assert.fail
+import org.robolectric.Shadows.shadowOf
 import java.util.Base64
 
 internal suspend fun waitUntil(timeoutMs: Long = 5000, message: String = "condition", condition: suspend () -> Boolean) {
@@ -11,6 +13,13 @@ internal suspend fun waitUntil(timeoutMs: Long = 5000, message: String = "condit
         delay(25)
     }
 }
+
+/** [waitUntil], running what is posted to the main thread (Robolectric's paused looper) each time. */
+internal suspend fun waitUntilOnMain(timeoutMs: Long = 5000, message: String = "condition", condition: suspend () -> Boolean) =
+    waitUntil(timeoutMs, message) {
+        shadowOf(Looper.getMainLooper()).idle()
+        condition()
+    }
 
 /** An unsigned JWT with [sub] (and [exp], epoch seconds): the SDK reads claims without verifying them. */
 internal fun jwt(sub: String?, exp: Long? = null, nonce: String = ""): String {

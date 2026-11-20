@@ -29,20 +29,25 @@ internal object RetryAfter {
     }
 }
 
-/** Kirora's `{ error: { code } }`, when the answer has one. Reads the error body, so call once. */
-internal fun Response<*>.errorCode(): String? = try {
-    errorBody()?.string()?.let { text -> JsonParser.parseString(text).asJsonObject.errorCode() }
-} catch (_: Exception) {
-    null
-}
-
 /** The non-blank string `code` of a `{ error: { code } }` object, or null when there isn't one. */
 internal fun JsonObject.errorCode(): String? =
-    ((get("error") as? JsonObject)?.get("code") as? JsonPrimitive)?.takeIf { it.isString }?.asString?.takeIf { it.isNotBlank() }
+    (get("error") as? JsonObject)?.stringField("code")?.takeIf { it.isNotBlank() }
 
-internal fun Response<*>.toApiError(): KiroraApiError {
-    val code = errorCode()
+/** The member [name] when it is a JSON string, else null. */
+internal fun JsonObject.stringField(name: String): String? =
+    (get(name) as? JsonPrimitive)?.takeIf { it.isString }?.asString
+
+/** The answer as a [KiroraApiError]. Reads the error body unless it was read already and passed as [body]. */
+internal fun Response<*>.toApiError(body: JsonObject? = errorObject()): KiroraApiError {
+    val code = body?.errorCode()
     return KiroraApiError(code(), code, "Kirora answered HTTP ${code()}${code?.let { " $it" } ?: ""}", RetryAfter.parse(headers()))
+}
+
+/** The error body as JSON, or null when there is none or it isn't an object. Reads the body, so call once. */
+internal fun Response<*>.errorObject(): JsonObject? = try {
+    errorBody()?.string()?.let { text -> JsonParser.parseString(text) as? JsonObject }
+} catch (_: Exception) {
+    null
 }
 
 /** `{ data: … }`, Kirora's answer envelope. */

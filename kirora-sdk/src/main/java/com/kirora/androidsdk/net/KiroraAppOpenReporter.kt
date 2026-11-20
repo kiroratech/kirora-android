@@ -4,6 +4,7 @@ import com.kirora.androidsdk.db.AppOpenDao
 import com.kirora.androidsdk.db.AppOpenEntity
 import com.kirora.androidsdk.identity.Identity
 import com.kirora.androidsdk.identity.SignedInUser
+import com.kirora.androidsdk.model.AuthFailureReason
 import com.kirora.androidsdk.model.UserTokenError
 import com.kirora.androidsdk.net.models.AppOpenRequest
 import com.kirora.androidsdk.utils.JsonSnapshot
@@ -40,6 +41,8 @@ internal class KiroraAppOpenReporter(
     /** The push app [subject]'s device registration names, or null when not registered for them. */
     private val registeredPushAppId: (subject: String) -> String?,
     private val trackingAllowed: () -> Boolean,
+    /** A background token failure, with the token it concerns. */
+    private val onAuthFailure: (AuthFailureReason, SignedInUser) -> Unit = { _, _ -> },
     /**
      * With `trackSessions` on, the 30-minute spacing is kept in storage with the visit; with it
      * off, in memory only, so nothing behavioural is stored for it.
@@ -200,13 +203,16 @@ internal class KiroraAppOpenReporter(
             val fresh = try {
                 identity.refresh(user, token)
             } catch (_: UserTokenError) {
+                onAuthFailure(AuthFailureReason.FETCH_FAILED, user)
                 null
             }
             if (fresh != null && fresh != token) response = post(service, deviceId, body, fresh) ?: return Result.RETRY
+            if (response.code() == 401) onAuthFailure(AuthFailureReason.REFUSED, user)
         }
         val code = response.code()
         return when {
             response.isSuccessful -> {
+                user.accepted()
                 backoffMs = FIRST_RETRY_MS
                 nextRetryAt = 0L
                 Result.DONE

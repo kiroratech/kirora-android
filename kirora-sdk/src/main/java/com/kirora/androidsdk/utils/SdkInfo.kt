@@ -7,6 +7,11 @@ import io.kirora.sdk.BuildConfig
  * (`kirora-react-native/<v>`, `kirora-flutter/<v>`) when React Native or Flutter drives this SDK.
  */
 internal object SdkInfo {
+    private val NAME_PATTERN = Regex("^[a-z0-9-]{1,40}$")
+
+    /** What the server takes as a `Kirora-SDK` version; kirora-sdk/build.gradle.kts checks the SDK's own against it. */
+    internal val VERSION_PATTERN = Regex("^[0-9A-Za-z.+-]{1,40}$")
+
     const val NAME = "kirora-android"
     val VERSION: String = BuildConfig.SDK_VERSION
 
@@ -20,9 +25,6 @@ internal object SdkInfo {
 
     val HEADER: String
         get() = "$name/$version"
-
-    private val NAME_PATTERN = Regex("^[a-z0-9-]{1,40}$")
-    private val VERSION_PATTERN = Regex("^[0-9A-Za-z.+-]{1,40}$")
 
     /** False, changing nothing, for a name or version the server would refuse. */
     fun setWrapper(wrapperName: String, wrapperVersion: String): Boolean {

@@ -338,4 +338,19 @@ class KiroraPushDisplayTest {
         shadowOf(Looper.getMainLooper()).idle()
         assertEquals("myapp://order/2", routed)
     }
+
+    @Test
+    fun aLongBodyWithoutAnImageExpands() {
+        val body = "word ".repeat(80).trim()
+        handle(kirora("title" to "T", "body" to body, "tag" to "long"))
+        val notification = shadowOf(manager).getNotification("long", 0)
+        assertEquals(body, notification.extras.getCharSequence(androidx.core.app.NotificationCompat.EXTRA_BIG_TEXT).toString())
+    }
+
+    @Test
+    fun aSoundTheAppDoesNotHaveKeepsTheDefault() {
+        assertNull(KiroraPushDisplay.soundUri(context, null))
+        assertNull(KiroraPushDisplay.soundUri(context, "default"))
+        assertNull(KiroraPushDisplay.soundUri(context, "no_such_sound.mp3"))
+    }
 }

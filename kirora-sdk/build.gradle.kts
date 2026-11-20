@@ -7,6 +7,11 @@ plugins {
 
 // Single source for the version: the Maven artifact, the Kirora-SDK header and event context.
 val sdkVersion = providers.gradleProperty("kiroraSdkVersion").get()
+// The backend refuses every call whose Kirora-SDK version doesn't match this (400 VALIDATION_ERROR).
+// Same pattern as SdkInfo.VERSION_PATTERN, which checks wrappers' versions at run time.
+require(Regex("^[0-9A-Za-z.+-]{1,40}$").matches(sdkVersion)) {
+    "kiroraSdkVersion '$sdkVersion' must match [0-9A-Za-z.+-]{1,40}, or Kirora refuses every call"
+}
 
 kotlin {
     explicitApi()
@@ -23,6 +28,11 @@ ksp {
 android {
     namespace = "io.kirora.sdk"
     compileSdk = 35
+
+    // The device tests' APK behaves as a current app would (notification permission, Android 13+).
+    testOptions {
+        targetSdk = compileSdk
+    }
 
     defaultConfig {
         minSdk = 24
@@ -133,4 +143,8 @@ dependencies {
     testImplementation(libs.androidx.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.kotlinx.coroutines.test)
+
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.core)
+    androidTestImplementation(libs.androidx.runner)
 }

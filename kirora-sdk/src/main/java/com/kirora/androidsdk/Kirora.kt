@@ -15,6 +15,7 @@ import com.kirora.androidsdk.db.EventEntity
 import com.kirora.androidsdk.db.KiroraDatabase
 import com.kirora.androidsdk.identity.Identity
 import com.kirora.androidsdk.identity.SignedInUser
+import com.kirora.androidsdk.model.AuthFailureReason
 import com.kirora.androidsdk.model.BeforeSendEvent
 import com.kirora.androidsdk.model.EventDropReason
 import com.kirora.androidsdk.model.KiroraApiError
@@ -60,6 +61,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -380,6 +382,7 @@ public class Kirora internal constructor(
             trackingAllowed = ::trackingAllowed,
             onTokenRefused = ::onTokenRefused,
             onDropped = ::reportDropped,
+            onAuthFailure = ::reportAuthFailure,
             clock = environment.clock
         )
         batchManager = batchMgr
@@ -396,6 +399,7 @@ public class Kirora internal constructor(
             listeners = pushListeners,
             bridge = if (this.options.push != null) environment.pushBridge ?: loadPushBridge() else null,
             registrationDetails = { contextProvider?.registrationDetails() ?: RegistrationDetails() },
+            onAuthFailure = ::reportAuthFailure,
             clock = environment.clock
         )
         pushManager = pushMgr
@@ -408,6 +412,7 @@ public class Kirora internal constructor(
             identity = identity,
             registeredPushAppId = pushMgr::registeredPushAppId,
             trackingAllowed = ::trackingAllowed,
+            onAuthFailure = ::reportAuthFailure,
             persistSpacing = this.options.trackSessions,
             purges = PendingPurges({ prefs.pendingPurges("app_opens") }, { prefs.setPendingPurges("app_opens", it) }, PURGE_RETRY_MS),
             clock = environment.clock
@@ -524,8 +529,38 @@ public class Kirora internal constructor(
         }
     }
 
-    /** Once signed in: adopt and send what waits, register the device for push, report a waiting app open. */
+    /**
+     * Once signed in: adopt and send what waits, register the device for push, report a waiting
+     * app open. A background authentication failure meanwhile (the first send's 401, say) waits
+     * until this ends: identify() throws it instead when the token is the problem.
+     */
     private suspend fun afterSignIn(previous: SignedInUser?, user: SignedInUser) {
+        synchronized(this) {
+            // A new identify() lets a later background failure be reported again.
+            user.authFailureReportedFor = null
+            user.signingIn++
+        }
+        var tokenProblem = false
+        try {
+            signInSteps(previous, user)
+        } catch (e: Exception) {
+            tokenProblem = e is UserTokenError || (e as? KiroraApiError)?.status == 401
+            throw e
+        } finally {
+            val held = synchronized(this) {
+                user.signingIn--
+                if (tokenProblem) {
+                    // identify() throws it: not reported again as a background failure.
+                    user.authFailureReportedFor = user.token
+                    user.heldAuthFailure = null
+                }
+                if (user.signingIn == 0) user.heldAuthFailure.also { user.heldAuthFailure = null } else null
+            }
+            held?.let { reportAuthFailure(it, user) }
+        }
+    }
+
+    private suspend fun signInSteps(previous: SignedInUser?, user: SignedInUser) {
         if (previous !== user) {
             // A's unsent events keep A as their owner; only the visit and A's marketing consent end.
             if (previous != null && previous.subject != user.subject) preferences?.clearUserData()
@@ -669,9 +704,44 @@ public class Kirora internal constructor(
         if (consentRefused()) forgetDeviceIdIfUnused()
     }
 
+    // ---- Background authentication failures --------------------------------------------------
+
+    /**
+     * Tells the app, on the main thread, that [user] can't stay authenticated in the background.
+     * Once per failure: again only after Kirora accepts their token or identify() is called.
+     * Held while identify() runs for them. Quiet once they are no longer the one
+     * signed in.
+     */
+    @Synchronized
+    private fun reportAuthFailure(reason: AuthFailureReason, user: SignedInUser) {
+        val callback = options.onAuthenticationFailed
+        if (destroyed || identity.user !== user || user.authFailureReportedFor != null) return
+        if (user.signingIn > 0) {
+            if (user.heldAuthFailure == null) user.heldAuthFailure = reason
+            return
+        }
+        val token = user.token
+        user.authFailureReportedFor = token
+        KiroraLogger.e("Kirora can't keep the user signed in (${reason.name}); call identify() again.")
+        if (callback == null) return
+        callbackScope.launch(Dispatchers.Main) {
+            // Checked again once on the main thread: a sign-out, another user, or a token Kirora
+            // accepted or identify() gave since makes this failure stale.
+            val current = synchronized(this@Kirora) {
+                !destroyed && identity.user === user && user.authFailureReportedFor == token
+            }
+            if (!current) return@launch
+            try {
+                callback(reason)
+            } catch (e: Exception) {
+                KiroraLogger.e("Error in onAuthenticationFailed", e)
+            }
+        }
+    }
+
     // ---- Early token refresh ---------------------------------------------------------------
 
-        /** The wait is wall-clock based but `delay` pauses in deep sleep, hence also [checkTokenExpiry] on foreground. */
+    /** The wait is wall-clock based but `delay` pauses in deep sleep, hence also [checkTokenExpiry] on foreground. */
     private fun scheduleTokenRefresh(user: SignedInUser) {
         refreshJob?.cancel()
         refreshJob = null
@@ -700,7 +770,12 @@ public class Kirora internal constructor(
         foregroundRefresh = scope.launch { refreshAhead(user, token) }
     }
 
+    /**
+     * Refreshes [stale] before it expires. A failure is retried, not reported, while the token is
+     * still valid; once it has expired and a refresh still fails, the app is told (FETCH_FAILED).
+     */
     private suspend fun refreshAhead(user: SignedInUser, stale: String) {
+        val expiresAt = JwtClaims.expiresAtMillis(stale) ?: Long.MAX_VALUE
         var attempt = 0
         while (identity.user === user) {
             val failure: UserTokenError? = try {
@@ -716,11 +791,16 @@ public class Kirora internal constructor(
             } catch (e: UserTokenError) {
                 e
             }
-            if (++attempt >= MAX_REFRESH_ATTEMPTS) {
-                KiroraLogger.e("Could not refresh the user token before it expired.", failure)
+            val now = environment.clock()
+            if (now >= expiresAt) {
+                KiroraLogger.e("Could not refresh the user token, which has expired.", failure)
+                reportAuthFailure(AuthFailureReason.FETCH_FAILED, user)
                 return
             }
-            delay(refreshRetryMs * attempt)
+            KiroraLogger.w("Could not refresh the user token before it expires; trying again.", failure)
+            // Doubling, but never past the expiry: the attempt right after it decides.
+            val wait = (refreshRetryMs shl minOf(attempt++, 5)).coerceAtMost(maxOf(expiresAt - now, 1L))
+            delay(wait)
         }
     }
 
@@ -895,15 +975,14 @@ public class Kirora internal constructor(
         val stored = readStoredConsent()
         consent = stored
         consentReadAt = environment.clock()
-        if (stored.refused) {
-            // One copy lost or corrupted: write the refusal back, so losing the other later can't lose it.
-            if (stored.answer != false || stored.refusalCopy != true) {
-                persistConsent(granted = false, restoring = true)
-            }
-            return
-        }
-        if (stored.fullyRead) return
+        // Read only: never repaired here (sdk-interface.md, "Tracking consent"). A grant clears the
+        // refusal copy before it records itself, so a "repair" made between the two, or after a
+        // grant another process completed since this read, would undo the grant for good. A
+        // refusal in either copy already counts; only setTrackingConsent writes.
+        if (stored.fullyRead && (stored.answer == false) == (stored.refusalCopy == true)) return
         val effect = when {
+            stored.refused ->
+                "one copy of the tracking refusal is missing or unreadable: the other still holds it, so nothing is tracked."
             !stored.answerReadable && stored.refusalCopy == null ->
                 "neither copy of the tracking choice can be read: nothing is tracked until one can, or setTrackingConsent answers."
             options.requireTrackingConsent && !stored.answerReadable ->
@@ -917,7 +996,7 @@ public class Kirora internal constructor(
     }
 
     /** Saves the choice off the caller's thread, one write after another, surviving [destroy]. */
-    private fun persistConsent(granted: Boolean, restoring: Boolean = false) {
+    private fun persistConsent(granted: Boolean) {
         val prefs = preferences ?: return
         val key = namespace ?: return
         unsavedConsent[key] = granted
@@ -930,7 +1009,6 @@ public class Kirora internal constructor(
             }
             when {
                 saved -> KiroraLogger.d("Tracking choice saved: ${if (granted) "granted" else "refused"}.")
-                restoring -> KiroraLogger.e("Kirora: a tracking refusal is on record but couldn't be written back to both copies.")
                 else -> KiroraLogger.e("Can't save the tracking choice on this device: it holds in memory until the app closes, so ask again on the next start.")
             }
         }
@@ -1516,22 +1594,34 @@ public class Kirora internal constructor(
         }
 
         /**
-         * A tap on a Kirora notification or one of its buttons: reports it to the push's
-         * `trackingUrl` (`opened`, or `clicked` for a link or a button), tells the app's click
-         * listeners, and keeps the tap for listeners that attach later. An operational report, sent
-         * whatever the behavioural tracking consent.
+         * Reports a tap on a Kirora notification or one of its buttons to the push's `trackingUrl`
+         * (`opened`, or `clicked` for a link or a button). An operational report, sent whatever the
+         * behavioural tracking consent. Completes when the first attempt has ended.
          */
-        @JvmStatic
-        internal fun handleNotificationTap(context: Context, data: Map<String, String>, trackingUrl: String?, clicked: Boolean) {
-            val app = context.applicationContext
+        internal fun reportNotificationTap(context: Context, trackingUrl: String?, clicked: Boolean): Deferred<Unit> {
             val current = active
-            KiroraPushTracker.report(
-                app,
+            return KiroraPushTracker.report(
+                context.applicationContext,
                 current?.options?.apiUrl,
                 trackingUrl,
                 if (clicked) KiroraPushTracker.CLICKED else KiroraPushTracker.OPENED,
                 current?.apiService
             )
+        }
+
+        /**
+         * A tap reaches the app (its link, `handleDeepLink`, a tap listener) after its report, but
+         * waits at most [TAP_REPORT_WAIT_MS] for it; the report goes on in the background after that.
+         */
+        internal suspend fun awaitTapReport(report: Deferred<Unit>) {
+            withTimeoutOrNull(TAP_REPORT_WAIT_MS) { report.await() }
+        }
+
+        /** How long a tap waits for its report before the app is told. */
+        internal const val TAP_REPORT_WAIT_MS = 1_500L
+
+        /** Tells the app's click listeners of a tap, or keeps it (the latest ten) for listeners that attach later. */
+        internal fun deliverNotificationTap(data: Map<String, String>) {
             val clickListeners = pushListeners.click
             if (clickListeners.isEmpty()) {
                 synchronized(pushListeners.pendingClicks) {
@@ -1594,7 +1684,6 @@ public class Kirora internal constructor(
 
         @Volatile
         internal var refreshRetryMs = 15_000L
-        private const val MAX_REFRESH_ATTEMPTS = 4
 
         internal fun resetForTesting() {
             active?.destroy()

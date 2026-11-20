@@ -4,9 +4,9 @@ Connect signed-in users' app activity to Kirora and register their devices for p
 Use the core library for events, screen views and sessions; add the FCM library when
 your app needs push notifications.
 
-**Preview — source version 0.1.0, Android 7.0 / API 24 and later.** The code findings of
-the [review](docs/review.md) are fixed and covered by tests. Still open before release:
-public Maven publication and real-device FCM checks. This guide documents the implemented
+**Preview — source version 0.1.0, Android 7.0 / API 24 and later.** Your app must compile
+against API 35 or later (`compileSdk = 35`), which the SDK's AndroidX dependencies require. Still open before
+release: public Maven publication and real-device FCM checks. This guide documents the implemented
 API; it does not certify public Maven availability.
 
 ## Choose the library
@@ -125,8 +125,13 @@ val options = KiroraOptions(
 
 The callback must obtain a token for the currently authenticated app user. It has a
 30-second timeout. With this callback, the SDK also fetches a new token 60 seconds before
-the current one expires, and when the app returns to the foreground. If it can't keep the
-user signed in, it logs an error; call `identify()` again.
+the current one expires, and when the app returns to the foreground.
+
+`onAuthenticationFailed = { reason -> }` tells you, on the main thread, when the SDK can't
+keep the user authenticated in the background: `AuthFailureReason.FETCH_FAILED` (your
+callback threw or timed out) or `REFUSED` (Kirora answered 401 to a fresh token, or there
+was none to try). It's called once per failure, never for one `identify()` already throws,
+and not while the user signs out. Events stay queued; call `identify()` again.
 
 Events captured before identify remain unbound on the device and are adopted by the
 next user who signs in. Nothing is sent anonymously. A direct switch from A to B keeps
@@ -322,7 +327,9 @@ Foreground messages display by default. `onForegroundNotification` can return fa
 suppress display. `addForegroundNotificationListener` receives arriving Kirora messages;
 remove listeners when their owner is disposed. `addNotificationClickListener` observes
 taps, including a buffered launch tap when attached after startup. Remove it with the
-same function instance via `removeNotificationClickListener`.
+same function instance via `removeNotificationClickListener`. A tap reaches your listener,
+`handleDeepLink` or the link after its `opened`/`clicked` report has been answered, waiting
+1.5 seconds at most; on a slow network the report carries on in the background.
 
 Provide `KiroraOptions.handleDeepLink` to route links in your app. It runs on the main
 thread; return true if you handled the link. Otherwise the SDK uses its native routing
@@ -418,9 +425,8 @@ Run the unit tests (Robolectric) with:
 ./gradlew :kirora-sdk:testDebugUnitTest
 ```
 
-See the [review](docs/review.md) and the shared
-[SDK contract](../../omnichannel/docs/sdk-interface.md) before release. Physical-device
-FCM checks (foreground, background, terminated launch, permission changes) are still to do.
+Physical-device FCM checks (foreground, background, terminated launch, permission changes) are
+still to do.
 
 ## License
 

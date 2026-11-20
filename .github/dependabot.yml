@@ -4,6 +4,14 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Every app that uses the SDK must compile against at least the Android API these libraries
+      # require: core-ktx 1.17+ and OkHttp 5.4+ require 36. The SDK compiles against 35, so raise
+      # these together with its compileSdk, deliberately (Braze is on 35; Customer.io, Airship 36).
+      - dependency-name: "androidx.core:core-ktx"
+        versions: [">=1.17.0"]
+      - dependency-name: "com.squareup.okhttp3:*"
+        versions: [">=5.4.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
