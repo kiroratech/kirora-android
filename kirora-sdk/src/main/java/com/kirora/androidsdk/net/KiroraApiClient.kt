@@ -26,11 +26,20 @@ internal object KiroraApiClient {
      * Request fields that are null are left out (a device detail that can't be read), but inside an
      * event's properties and context a null is the app's own value and is sent as null.
      */
-    private val gson: Gson = GsonBuilder()
+    internal val gson: Gson = GsonBuilder()
         .registerTypeHierarchyAdapter(JsonElement::class.java, NullKeepingJsonAdapter)
+        // As measured for the batch budget: `<`, `>`, `&`, `=` and `'` stay one byte, not six.
+        .disableHtmlEscaping()
         .create()
 
     private const val NO_CREDENTIALS = "Kirora-No-Credentials"
+
+    private val DEVICE_ID = Regex("(/devices/)[^/]+")
+    private val TRACKING_TOKEN = Regex("(/t/p/).+")
+
+    /** [path] with the installation id and a push's signed delivery token left out, for the log. */
+    internal fun redactedPath(path: String): String =
+        path.replace(DEVICE_ID, "$1…").replace(TRACKING_TOKEN, "$1…")
 
     /** OkHttp and Retrofit are built on first use, keeping `initialize()` off the startup path. */
     fun create(
@@ -90,7 +99,7 @@ internal object KiroraApiClient {
         val logInterceptor = Interceptor { chain ->
             val request = chain.request()
             val response = chain.proceed(request)
-            KiroraLogger.d("[HTTP] ${request.method} ${request.url.encodedPath} -> ${response.code}")
+            KiroraLogger.d("[HTTP] ${request.method} ${redactedPath(request.url.encodedPath)} -> ${response.code}")
             response
         }
 

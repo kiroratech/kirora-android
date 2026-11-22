@@ -39,7 +39,9 @@ internal class KiroraPermissionActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_CODE) return
-        deliver(grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+        // No result: the request was interrupted (another prompt, the app sent away), not refused.
+        val result = grantResults.firstOrNull() ?: return deliver(null)
+        deliver(result == PackageManager.PERMISSION_GRANTED)
     }
 
     private fun deliver(granted: Boolean?) {

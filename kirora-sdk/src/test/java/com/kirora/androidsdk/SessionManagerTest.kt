@@ -1,6 +1,7 @@
 package com.kirora.androidsdk
 
 import android.content.Context
+import android.os.Looper
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -17,6 +18,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 class SessionManagerTest {
@@ -47,7 +49,13 @@ class SessionManagerTest {
     /** Started as Kirora starts it: lifecycle watched, stored visit read (off the main thread there). */
     private fun SessionManager.begun() = also { start(); ensureBegun() }
 
-    private fun manager(trackSessions: Boolean = true, lifecycle: Boolean = false, version: String = "1.0.0", build: String = "1") =
+    private fun manager(
+        trackSessions: Boolean = true,
+        lifecycle: Boolean = false,
+        version: String = "1.0.0",
+        build: String = "1",
+        processLifecycle: () -> Lifecycle = { ProcessLifecycleOwner.get().lifecycle }
+    ) =
         SessionManager(
             preferences = preferences,
             trackSessions = trackSessions,
@@ -59,7 +67,8 @@ class SessionManagerTest {
             onBackground = {},
             onAppOpen = { opens++ },
             isTrackingAllowed = { trackingAllowed },
-            clock = { now }
+            clock = { now },
+            processLifecycle = processLifecycle
         )
 
     @Test
@@ -128,10 +137,7 @@ class SessionManagerTest {
 
     @Test
     fun aReplacementStartedInTheForegroundDoesntCountTheLaunchAgain() {
-        val owner = object : LifecycleOwner {
-            val registry = LifecycleRegistry.createUnsafe(this)
-            override val lifecycle: Lifecycle get() = registry
-        }
+        val owner = FakeProcess()
         fun manager() = SessionManager(
             preferences, trackSessions = false, trackAppLifecycle = true, appVersion = "1", appBuild = "1",
             trackEvent = { name, properties -> tracked.add(name to properties) }, owner = { null },
@@ -229,4 +235,21 @@ class SessionManagerTest {
             tracked
         )
     }
+
+    @Test
+    fun aManagerStoppedBeforeItsObserverWasAddedNeverAddsIt() {
+        val process = FakeProcess()
+        val m = manager(processLifecycle = { process.lifecycle })
+        // Made off the main thread: adding the observer is posted. Destroyed before it runs.
+        Thread { m.start() }.apply { start() }.join()
+        m.stop()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals("only the process watcher, never this manager", true, process.registry.observerCount <= 1)
+    }
+}
+
+/** The app process's lifecycle, driven by the test. */
+private class FakeProcess : LifecycleOwner {
+    val registry = LifecycleRegistry.createUnsafe(this)
+    override val lifecycle: Lifecycle get() = registry
 }

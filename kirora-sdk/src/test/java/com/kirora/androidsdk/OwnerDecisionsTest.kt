@@ -92,6 +92,7 @@ internal class OwnerDecisionsTest : KiroraTestBase() {
     @Test
     fun aRefusedTokenHoldsPushRegistrationUntilANewOne() = runBlocking {
         val kirora = refusedAfterRegistering()
+        bridge.token = "fcm-2" // Firebase's current token, as onNewToken reports it
         kirora.onNewPushToken("fcm-2")
         delay(200)
         assertEquals("not registered with the refused token", 1, fake.deviceRegistrations.size)

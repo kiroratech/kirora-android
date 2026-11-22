@@ -1,6 +1,5 @@
 package com.kirora.androidsdk.push
 
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -110,6 +109,7 @@ internal class KiroraPushManager(
     /** A new FCM token: kept, and registered for the signed-in user. */
     fun onNewToken(token: String) {
         global.setPushToken(token)
+        tokenChecked = true
         val user = identity.user ?: return
         scope.launch { registerLogged(user) }
     }
@@ -158,7 +158,7 @@ internal class KiroraPushManager(
         val details = registrationDetails()
         val detailsKey = details.key()
         if (!notificationsEnabled()) return reportDenied(user, details, detailsKey)
-        val token = global.getPushToken() ?: fetchFcmToken()?.also { global.setPushToken(it) }
+        val token = currentToken()
         if (token == null) {
             KiroraLogger.d("No push token yet; the device registers once Firebase has one.")
             return
@@ -261,6 +261,24 @@ internal class KiroraPushManager(
     /** [Identity.authorized], with a token waiting for identify() answered as Kirora would: 401. */
     private suspend fun <T> authorized(user: SignedInUser, call: suspend (authorization: String) -> Response<T>): Response<T> =
         identity.authorized(user, call) ?: throw KiroraApiError(401, "UNAUTHORIZED", "Kirora refused the user token: call identify() with a new one")
+
+    /** Whether the kept token was checked with Firebase (or just came from it) in this process. */
+    @Volatile
+    private var tokenChecked = false
+
+    /**
+     * The token to register: the kept one, checked with Firebase once per process, since a refresh
+     * whose `onNewToken` never arrived would otherwise leave a dead token registered. The kept one
+     * when Firebase can't answer in time.
+     */
+    private suspend fun currentToken(): String? {
+        val cached = global.getPushToken()
+        if (cached != null && (tokenChecked || bridge == null)) return cached
+        val fresh = if (cached == null) fetchFcmToken() else withTimeoutOrNull(TOKEN_CHECK_MS) { fetchFcmToken() }
+        if (fresh != null) tokenChecked = true
+        if (fresh != null && fresh != cached) global.setPushToken(fresh)
+        return fresh ?: cached
+    }
 
     private suspend fun fetchFcmToken(): String? {
         val b = bridge
@@ -571,10 +589,11 @@ internal class KiroraPushManager(
             Kirora.foregroundHandler ?: pushOptions?.onForegroundNotification
         )
 
-    /** Reports a tap that launched or re-entered the app. Safe to call repeatedly for one intent. */
+    /** [Kirora.handleNotificationIntent]. Safe to call repeatedly for one intent; one reopened from Recents is not a tap. */
     @Suppress("DEPRECATION")
     fun handleNotificationIntent(intent: Intent?): Boolean {
         if (intent == null) return false
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return false
         return try {
             val extras = intent.extras ?: return false
             if (extras.getBoolean(HANDLED_EXTRA, false)) return false
@@ -603,18 +622,13 @@ internal class KiroraPushManager(
         }
     }
 
-    fun activityResumed(activity: Activity) {
-        // The tap screen reports and delivers its own taps; handling its intent here too would
-        // deliver each tap twice and report it as both `clicked` and `opened`.
-        if (activity is KiroraPushTrampolineActivity) return
-        handleNotificationIntent(activity.intent)
-    }
-
     companion object {
         private const val GRANTED = "granted"
         private const val DENIED = "denied"
         private const val FCM_TOKEN = "fcm_token"
         private const val HANDLED_EXTRA = "kirora.handled"
+        /** How long a registration waits for Firebase to confirm the kept token. */
+        private const val TOKEN_CHECK_MS = 5_000L
         /** Registered again at most daily for the same user, token and details. */
         private const val REGISTRATION_REFRESH_MS = 24L * 60 * 60 * 1000
         private const val FIRST_CLEANUP_RETRY_MS = 30_000L

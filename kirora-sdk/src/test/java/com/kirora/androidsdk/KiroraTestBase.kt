@@ -3,9 +3,13 @@ package com.kirora.androidsdk
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.kirora.androidsdk.model.KiroraOptions
+import com.kirora.androidsdk.model.KiroraPushOptions
 import com.kirora.androidsdk.net.FakeKiroraApiService
 import com.kirora.androidsdk.push.KiroraPushBridge
 import com.kirora.androidsdk.utils.GlobalPreferences
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
@@ -65,6 +69,20 @@ internal abstract class KiroraTestBase {
     protected suspend fun Kirora.waiting(): List<String> = databaseForTesting!!.eventDao().unowned().map { it.name }
 
     protected suspend fun Kirora.waitWaiting(name: String) = waitUntil(message = "$name waiting") { name in waiting() }
+
+    /**
+     * A client whose identify() is still fetching its token (from fetchUserToken) while [during]
+     * runs; the token then arrives, and the sign-in ends however [during] left it.
+     */
+    protected suspend fun withSignInUnderWay(push: KiroraPushOptions? = null, during: suspend (Kirora) -> Unit) = coroutineScope {
+        val token = CompletableDeferred<String>()
+        val kirora = start(KiroraOptions(trackSessions = false, fetchUserToken = { token.await() }, push = push))
+        val signingIn = launch { runCatching { kirora.identify() } }
+        waitUntil(message = "sign-in under way") { kirora.identity.signInUnderWay }
+        during(kirora)
+        token.complete(jwt("user-a"))
+        signingIn.join()
+    }
 
     /** user-a's visit (signed in, one event sent), then a relaunch: nobody signed in yet. */
     protected suspend fun relaunchedAfterAVisit(options: KiroraOptions): Kirora {

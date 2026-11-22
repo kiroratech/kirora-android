@@ -3,6 +3,8 @@ package com.kirora.androidsdk.net
 import com.kirora.androidsdk.db.PurgeTarget
 import com.kirora.androidsdk.utils.KiroraLogger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -45,6 +47,9 @@ internal class PendingPurges(
     /** What is owed, read from storage on first use rather than at construction. Published only once read. */
     private val owedRead = lazy(this) { readOwed() }
 
+    /** One settlement at a time ([settle]). */
+    private val settling = Mutex()
+
     private fun ensureLoaded() = owedRead.value
 
     private fun readOwed() {
@@ -86,6 +91,12 @@ internal class PendingPurges(
      */
     suspend fun settle(target: PurgeTarget): Boolean {
         if (isEmpty) return true
+        // One at a time: a second settlement's delete, landing after the first has finished and a
+        // write has followed it, would take that new row too.
+        return settling.withLock { if (isEmpty) true else settleNow(target) }
+    }
+
+    private suspend fun settleNow(target: PurgeTarget): Boolean {
         if (clock() < nextAttemptAt) return false
         val (purgeAll, purgeOwners, owedAt) = synchronized(this) { Triple(all, owners.toList(), version) }
         try {

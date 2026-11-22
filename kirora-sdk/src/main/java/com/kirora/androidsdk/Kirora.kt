@@ -1,10 +1,7 @@
 package com.kirora.androidsdk
 
-import android.app.Activity
-import android.app.Application
 import android.content.Context
 import android.content.Intent
-import android.os.Bundle
 import android.os.SystemClock
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
@@ -166,9 +163,6 @@ public class Kirora internal constructor(
     @Volatile
     private var networkMonitor: KiroraNetworkMonitor? = null
 
-    @Volatile
-    private var activityCallbacks: Application.ActivityLifecycleCallbacks? = null
-
     internal val identity = Identity(options.fetchUserToken, environment.clock)
 
     /** Events a sign-in adopted, given back if Kirora refuses that user's token before accepting it once. */
@@ -196,8 +190,6 @@ public class Kirora internal constructor(
     @Volatile
     private var foregroundRefresh: Job? = null
 
-    @Volatile
-    private var lastScheduledExpiry = 0L
 
     private val scope = CoroutineScope(SupervisorJob() + environment.io)
 
@@ -293,7 +285,7 @@ public class Kirora internal constructor(
     /** Forgets every event waiting on the device. */
     public fun clearQueue() {
         val queue = store ?: return
-        scope.launch(queueWork) {
+        scope.launchInQueue {
             try {
                 queue.clearAll()
             } catch (e: Exception) {
@@ -436,7 +428,6 @@ public class Kirora internal constructor(
             processLifecycle = { processLifecycle() }
         )
 
-        if (this.options.push != null) registerNotificationIntentWatcher(app, pushMgr)
         val apiUrl = this.options.apiUrl
         val pushOptions = this.options.push
         val netMon = KiroraNetworkMonitor(app) {
@@ -450,7 +441,7 @@ public class Kirora internal constructor(
         // Off the caller's thread (often the main one, in Application.onCreate): everything read
         // from storage at start, what callers may wait on first. A call that needs one of them
         // sooner reads it then, and waits.
-        scope.launch(queueWork) {
+        scope.launch {
             try {
                 ensureConsentRead()
                 // What's stored from before the user refused, e.g. before consent was required.
@@ -553,6 +544,8 @@ public class Kirora internal constructor(
     }
 
     private suspend fun signInSteps(previous: SignedInUser?, user: SignedInUser) {
+        // Superseded already (another identify(), or a sign-out): nothing here is this user's to change.
+        if (identity.user !== user) return
         if (previous !== user) {
             // A's unsent events keep A as their owner; only the visit and A's marketing consent end.
             if (previous != null && previous.subject != user.subject) preferences?.clearUserData()
@@ -566,8 +559,8 @@ public class Kirora internal constructor(
         if (queue != null) {
             try {
                 // On the queue's own dispatcher: everything tracked before this sign-in is stored first.
-                withContext(queueWork) {
-                    if (identity.user !== user) return@withContext
+                inQueue {
+                    if (identity.user !== user) return@inQueue
                     val keys = queue.adopt(user.subject)
                     adoption = if (keys.isNotEmpty() && !user.confirmed) user to keys else null
                     queue.clearUnnamedExcept(user.subject)
@@ -603,7 +596,7 @@ public class Kirora internal constructor(
         val taken = adoption ?: return
         if (taken.first !== user || user.confirmed) return
         adoption = null
-        scope.launch(queueWork) {
+        scope.launchInQueue {
             try {
                 store?.release(user.subject, taken.second)
             } catch (e: Exception) {
@@ -629,42 +622,41 @@ public class Kirora internal constructor(
         val deadline = environment.clock() + LOGOUT_DEADLINE_MS
         // At once, before anything waits: the outgoing user is captured, a sign-in still waiting
         // for its token is abandoned (this logout came after it), and whatever is tracked from now
-        // on belongs to no one, waiting for the next sign-in.
-        val user = identity.end()
+        // on belongs to no one. The abandoned sign-in would have adopted the waiting events and been
+        // signed out with them, so they go as if it had landed.
+        val ended = identity.end()
+        val user = ended.user
         // Before anything waits: a sign-in made meanwhile must not have its state cleared by this one.
         if (user != null) signOutLocally(user)
-        dropWaitingFromBeforeSignIn(signedIn = user != null)
-        if (user == null) {
-            // Nobody signed in here (a relaunch, before identify()): the device's last registration
-            // is still detached, by its device secret.
-            try {
-                pushManager?.detachLastRegistration(deadline)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                KiroraLogger.e("Logout failed to detach the device", e)
-            }
-            return
-        }
         try {
-            // Independent, both with the outgoing user's token: side by side, so a slow flush
-            // doesn't eat the detachment's share of the deadline.
+            // Side by side, each started at once ([now]): the drop takes its place in the queue ahead
+            // of any later sign-in's adoption, and the detachment is captured (and kept on the device)
+            // without waiting behind the queue, so a destroy() or the process ending can't lose it.
             coroutineScope {
-                launch {
-                    val flushed = withTimeoutOrNull((deadline - environment.clock()).coerceAtLeast(1L)) {
-                        batchManager?.flushAs(user)
-                        true
-                    } != null
-                    if (!flushed) KiroraLogger.e("Gave up waiting for Kirora; the user's unsent events are dropped.")
+                fun now(block: suspend () -> Unit) = launch(start = CoroutineStart.UNDISPATCHED) { block() }
+                now { dropWaitingFromBeforeSignIn(signedIn = user != null || ended.abandonedSignIn) }
+                if (user == null) {
+                    // Nobody signed in (a relaunch, before identify()): the last registration goes by its device secret.
+                    now { pushManager?.detachLastRegistration(deadline) }
+                } else {
+                    // Bounded by the deadline itself, so a cut-off attempt is still retried in the background.
+                    now { pushManager?.detach(user, deadline) }
+                    // With the outgoing user's token, beside the detachment so it doesn't eat its share of the deadline.
+                    launch {
+                        val flushed = withTimeoutOrNull((deadline - environment.clock()).coerceAtLeast(1L)) {
+                            batchManager?.flushAs(user)
+                            true
+                        } != null
+                        if (!flushed) KiroraLogger.e("Gave up waiting for Kirora; the user's unsent events are dropped.")
+                    }
                 }
-                // Bounded by the deadline itself, so a cut-off attempt is still retried in the background.
-                launch { pushManager?.detach(user, deadline) }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             KiroraLogger.e("Logout failed to clean up", e)
         }
+        if (user == null) return
         dropOwnedBy(user)
         KiroraLogger.d("User logged out.")
     }
@@ -683,7 +675,7 @@ public class Kirora internal constructor(
 
     /**
      * At a sign-out, the events waiting from before sign-in, so the next user doesn't adopt them.
-     * With someone [signedIn], all of them. With nobody, only those that continued a signed-in
+     * With someone [signedIn] (or signing in), all of them. With nobody, only those that continued a signed-in
      * user's visit: an app that restored its own session after a relaunch, before identify(), and
      * the user it signs out made them. A visitor who never signed in keeps theirs (a sign-up funnel),
      * and so does every event when sessions are off, as nothing tells them apart. Those tracked
@@ -693,7 +685,7 @@ public class Kirora internal constructor(
         val queue = store ?: return
         try {
             // On the queue's own dispatcher: everything tracked before this sign-out is stored first.
-            val dropped = withContext(queueWork) { queue.clearUnowned(onlySignedInVisits = !signedIn) }
+            val dropped = inQueue { queue.clearUnowned(onlySignedInVisits = !signedIn) }
             reportDropped(dropped, EventDropReason.UNDELIVERABLE)
         } catch (e: CancellationException) {
             throw e
@@ -709,7 +701,6 @@ public class Kirora internal constructor(
         refreshJob = null
         foregroundRefresh?.cancel()
         foregroundRefresh = null
-        lastScheduledExpiry = 0L
         sessionManager?.reset()
         preferences?.clearUserData()
     }
@@ -718,7 +709,7 @@ public class Kirora internal constructor(
     private fun dropOwnedBy(user: SignedInUser) {
         // Unless they signed in again meanwhile: then it's theirs to send.
         if (identity.user?.subject != user.subject) {
-            scope.launch(queueWork) {
+            scope.launchInQueue {
                 try {
                     reportDropped(store?.clearOwnedBy(user.subject) ?: 0, EventDropReason.UNDELIVERABLE)
                 } catch (e: Exception) {
@@ -760,16 +751,19 @@ public class Kirora internal constructor(
     // ---- Early token refresh ---------------------------------------------------------------
 
     /** The wait is wall-clock based but `delay` pauses in deep sleep, hence also [checkTokenExpiry] on foreground. */
+    @Synchronized
     private fun scheduleTokenRefresh(user: SignedInUser) {
+        // Late work for someone no longer signed in never touches the current user's refresh.
+        if (identity.user !== user) return
         refreshJob?.cancel()
         refreshJob = null
         if (options.fetchUserToken == null) return
         val (token, expiry) = user.current
         val expiresAt = expiry ?: return
         val due = expiresAt - TOKEN_REFRESH_LEAD_MS - environment.clock()
-        // fetchUserToken handed back a token no longer-lived than the last one: refreshing again would loop.
-        if (due <= 0 && expiresAt <= lastScheduledExpiry) return
-        lastScheduledExpiry = expiresAt
+        // fetchUserToken handed back a token no longer-lived than this user's last one: refreshing again would loop.
+        if (due <= 0 && expiresAt <= user.refreshScheduledFor) return
+        user.refreshScheduledFor = expiresAt
         val wait = due.coerceAtLeast(minRefreshDelayMs)
         refreshJob = scope.launch {
             delay(wait)
@@ -872,7 +866,9 @@ public class Kirora internal constructor(
         // Not on this client's scope: destroy() must not cancel an event tracked before it, which
         // waits in the database for the next client. (With no database, only in memory, it is
         // this client's and goes with it, like the rest of its memory queue.)
-        queueWrites.launch {
+        // On the queue's thread, in call order; only the store write takes the queue's lock, so the
+        // next event's JSON is built while this one's waits on Room, and still lands after it.
+        queueWrites.launch(queueWork) {
             try {
                 // Consent withdrawn while this was waiting. A destroy() meanwhile doesn't drop it:
                 // it waits on the device for the next client. (A withdrawal through that client
@@ -904,8 +900,10 @@ public class Kirora internal constructor(
                     visitOwner = visitOwner,
                     sizeBytes = size
                 )
-                reportDropped(queue.add(entity), EventDropReason.QUEUE_FULL)
-                batchManager?.onEventQueued()
+                queueOrder.withLock {
+                    reportDropped(queue.add(entity), EventDropReason.QUEUE_FULL)
+                    batchManager?.onEventQueued()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -991,15 +989,19 @@ public class Kirora internal constructor(
         val known = consent
         val now = environment.clock()
         if (known != null && (known.fullyRead || now - consentReadAt < CONSENT_REREAD_MS)) return known
-        return readStoredConsent().also {
-            consent = it
+        val reread = readStoredConsent()
+        return synchronized(consentReadLock) {
+            // An answer given while this read was under way is newer than anything it found.
+            if (consent !== known) return@synchronized consent ?: reread
+            consent = reread
             consentReadAt = now
+            reread
         }
     }
 
     private fun readConsentAtStart() {
         // A client replaced a moment ago may still be writing its choice: that choice is the one.
-        unsavedConsent[namespace]?.let { granted ->
+        unsavedConsent[namespace]?.granted?.let { granted ->
             consent = StoredConsent(answer = granted, answerReadable = true, refusalCopy = !granted)
             consentReadAt = environment.clock()
             return
@@ -1031,13 +1033,15 @@ public class Kirora internal constructor(
     private fun persistConsent(granted: Boolean) {
         val prefs = preferences ?: return
         val key = namespace ?: return
-        unsavedConsent[key] = granted
+        // Each write its own entry: a later one with the same answer (false, true, false) isn't removed by this one.
+        val pending = PendingChoice(granted)
+        unsavedConsent[key] = pending
         lastConsentWrite = consentWrites.launch {
             val saved = try {
                 prefs.writeTrackingConsent(granted)
             } finally {
                 // Unless a later choice is waiting behind this one.
-                unsavedConsent.remove(key, granted)
+                unsavedConsent.remove(key, pending)
             }
             when {
                 saved -> KiroraLogger.d("Tracking choice saved: ${if (granted) "granted" else "refused"}.")
@@ -1079,8 +1083,10 @@ public class Kirora internal constructor(
         }
         val before = trackingAllowed()
         // Takes effect at once, whether or not it can be saved; saved off this thread.
-        consent = StoredConsent(answer = granted, answerReadable = true, refusalCopy = !granted)
-        consentReadAt = environment.clock()
+        synchronized(consentReadLock) {
+            consent = StoredConsent(answer = granted, answerReadable = true, refusalCopy = !granted)
+            consentReadAt = environment.clock()
+        }
         persistConsent(granted)
         if (!granted) {
             batchManager?.cancel()
@@ -1099,7 +1105,7 @@ public class Kirora internal constructor(
         sessionManager?.reset()
         val queue = store
         if (queue != null) {
-            scope.launch(queueWork) {
+            scope.launchInQueue {
                 try {
                     queue.clearAll()
                 } catch (e: Exception) {
@@ -1315,8 +1321,8 @@ public class Kirora internal constructor(
     }
 
     /**
-     * Reports a notification tap found in [intent]. Done automatically for every activity when
-     * `push` is on; call it yourself only if you open notifications some other way.
+     * Reports a notification tap found in [intent], for apps that show Kirora's notifications some
+     * other way. Taps on the notifications the SDK draws are reported by the SDK itself.
      */
     public fun handleNotificationIntent(intent: Intent?): Boolean = pushManager?.handleNotificationIntent(intent) ?: false
 
@@ -1329,11 +1335,16 @@ public class Kirora internal constructor(
      */
     public suspend fun flush() {
         if (!isInitialized || destroyed) return
+        afterQueuedWrites()
         batchManager?.flush(waiveBackoff = true)
     }
 
+    /** Waits for every event tracked so far to be stored, so a flush now carries them. */
+    private suspend fun afterQueuedWrites() = inQueue { }
+
     private suspend fun runFlush() {
         try {
+            afterQueuedWrites()
             batchManager?.flush()
         } catch (e: CancellationException) {
             throw e
@@ -1361,27 +1372,10 @@ public class Kirora internal constructor(
         networkMonitor?.stop()
         networkMonitor = null
         sessionManager?.stop()
-        activityCallbacks?.let { (appContext as? Application)?.unregisterActivityLifecycleCallbacks(it) }
-        activityCallbacks = null
         scope.cancel()
         synchronized(Kirora::class.java) {
             if (active === this) active = null
         }
-    }
-
-    private fun registerNotificationIntentWatcher(app: Context, manager: KiroraPushManager) {
-        val application = app as? Application ?: return
-        val callbacks = object : Application.ActivityLifecycleCallbacks {
-            override fun onActivityResumed(activity: Activity) = manager.activityResumed(activity)
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-            override fun onActivityStarted(activity: Activity) {}
-            override fun onActivityPaused(activity: Activity) {}
-            override fun onActivityStopped(activity: Activity) {}
-            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-            override fun onActivityDestroyed(activity: Activity) {}
-        }
-        application.registerActivityLifecycleCallbacks(callbacks)
-        activityCallbacks = callbacks
     }
 
     private fun loadPushBridge(): KiroraPushBridge? = try {
@@ -1399,7 +1393,6 @@ public class Kirora internal constructor(
 
     internal val databaseForTesting: KiroraDatabase?
         get() = database
-
 
     public companion object {
         private val pushListeners = PushListeners()
@@ -1672,17 +1665,29 @@ public class Kirora internal constructor(
         /** How often a tracking choice that couldn't be fully read is read again. */
         private const val CONSENT_REREAD_MS = 30_000L
         /**
-         * The event queue's work, one task at a time in call order, shared by every client in the
-         * process: a sign-in adopts exactly what was tracked before it, by this client or one it replaced.
+         * The event queue, shared by every client in the process: a sign-in adopts exactly what was
+         * tracked before it, by this client or one it replaced. Tasks start one at a time in call
+         * order on [queueWork], and [queueOrder] (fair) keeps that order while one waits on Room's own
+         * executor, when the thread would otherwise start the next. Enter only through
+         * [launchInQueue] and [inQueue] (and the event write, which takes the lock for its store write).
          */
         private val queueWork: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
+        private val queueOrder = Mutex()
 
-        /** Event writes, on [queueWork]; not cancelled by destroy(). */
-        private val queueWrites = CoroutineScope(SupervisorJob() + queueWork)
+        /** Event writes; not cancelled by destroy(). */
+        private val queueWrites = CoroutineScope(SupervisorJob())
+
+        /** Runs [block] on the event queue after everything put on it before has finished. */
+        internal fun CoroutineScope.launchInQueue(block: suspend CoroutineScope.() -> Unit): Job =
+            launch(queueWork) { queueOrder.withLock { block() } }
+
+        /** [launchInQueue], waiting for the answer. */
+        internal suspend fun <T> inQueue(block: suspend CoroutineScope.() -> T): T =
+            withContext(queueWork) { queueOrder.withLock { block() } }
 
         /** Holds the event queue until [release] completes, for tests. */
         internal fun holdQueueForTesting(release: CountDownLatch) {
-            queueWrites.launch { release.await() }
+            queueWrites.launchInQueue { release.await() }
         }
 
         /** Tracking-choice writes, in order, for every client in the process; not cancelled by destroy(). */
@@ -1695,7 +1700,10 @@ public class Kirora internal constructor(
          * Per workspace, the tracking choice still being written. A client created in the meantime
          * (one replacing another) takes it rather than the storage it hasn't reached yet.
          */
-        private val unsavedConsent = ConcurrentHashMap<String, Boolean>()
+        private val unsavedConsent = ConcurrentHashMap<String, PendingChoice>()
+
+        /** A tracking choice still being written. Equal only to itself, so each write removes only its own. */
+        private class PendingChoice(val granted: Boolean)
 
         /** Holds tracking-choice writes until [release] completes, for tests. */
         internal fun holdConsentWritesForTesting(release: CountDownLatch) {

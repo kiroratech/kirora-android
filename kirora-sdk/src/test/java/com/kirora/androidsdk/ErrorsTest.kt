@@ -219,8 +219,10 @@ internal class ErrorsTest : KiroraTestBase() {
         shadowOf(Looper.getMainLooper()).idle()
         assertEquals(1, seen.size)
 
-        // Accepted once, then refused again: a new failure.
+        // With no fetchUserToken, only identify() can replace the refused token (nothing is sent
+        // with it meanwhile). Accepted with the new one, then refused again: a new failure.
         fake.batchResponder = null
+        kirora.identify(jwt("user-a", nonce = "new"))
         kirora.batchManager!!.flush(waiveBackoff = true)
         kirora.waitQueued(0)
         fake.batchResponder = { _, _ -> FakeKiroraApiService.error(401, "UNAUTHORIZED") }

@@ -151,6 +151,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
             release.await()
             Response.success(DataEnvelope(DeviceAnswer(lastSeenAt = "2026-11-17T09:00:00.000Z")))
         }
+        bridge.token = "fcm-2" // Firebase's current token, as onNewToken reports it
         kirora.pushManager!!.onNewToken("fcm-2")
         waitUntil(message = "the refresh's PUT") { fake.deviceRegistrations.size == 2 }
 
@@ -224,6 +225,17 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertEquals("nothing left to adopt", emptyList<String>(), store.adopt("user-b"))
         assertEquals(0, database.eventDao().getCount())
         assertNull("nothing owed any more", saved)
+    }
+
+    @Test
+    fun eventsHeldOnlyInMemoryAreGoneOnceRemovedWhateverTheDatabaseSays() = runBlocking {
+        val database = newDatabase()
+        val dao = FlakyDao(database.eventDao())
+        val store = EventStore({ dao })
+        dao.failWrites = true // the database failing: events fall back to memory
+        val e = event(1L)
+        store.add(e)
+        assertTrue("removed from memory: delivery goes on without a backoff", store.remove(listOf(e.idempotencyKey)))
     }
 
     @Test

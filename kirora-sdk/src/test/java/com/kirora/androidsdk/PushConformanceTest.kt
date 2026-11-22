@@ -61,6 +61,7 @@ internal class PushConformanceTest : KiroraTestBase() {
         assertEquals(1, fake.pushAppQueries.size)
 
         val kirora = Kirora.active!!
+        bridge.token = "fcm-2" // Firebase's current token, as onNewToken reports it
         kirora.onNewPushToken("fcm-2")
         waitUntil(message = "registered with the new token") { fake.deviceRegistrations.size == 2 }
         assertEquals("fcm-2", fake.deviceRegistrations.last().second.target)
@@ -235,11 +236,8 @@ internal class PushConformanceTest : KiroraTestBase() {
     private fun tap(link: String) =
         Robolectric.buildActivity(KiroraPushTrampolineActivity::class.java, tapIntent(link)).create()
 
-    private fun tapIntent(link: String): Intent = Intent(context, KiroraPushTrampolineActivity::class.java)
-        .putExtra("kirora", "true")
-        .putExtra("link", link)
-        .putExtra("trackingUrl", "https://api.kirora.io/t/p/tap-token")
-        .putExtra(KiroraPushTrampolineActivity.EXTRA_NOTIFICATION_ID, 0)
+    private fun tapIntent(link: String): Intent =
+        context.tapIntent("link" to link, "trackingUrl" to "https://api.kirora.io/t/p/tap-token")
 
     @Test
     fun aTapReachesTheAppAfterItsReport() = runBlocking {

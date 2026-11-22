@@ -69,4 +69,14 @@ internal class LogoutDropsUnboundTest : KiroraTestBase() {
         kirora.logout()
         assertEquals(0, kirora.queued())
     }
+
+    @Test
+    fun aSignInStillFetchingItsTokenCountsAsSignedIn() = runBlocking {
+        withSignInUnderWay { kirora ->
+            kirora.track("Before sign-in") // a first-time user: no earlier visit marks it
+            kirora.waitWaiting("Before sign-in")
+            kirora.logout()
+            assertEquals("adopted and signed out with it, not left for the next user", emptyList<String>(), kirora.waiting())
+        }
+    }
 }

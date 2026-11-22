@@ -252,26 +252,19 @@ class KiroraPushDisplayTest {
         Robolectric.buildActivity(KiroraPushTrampolineActivity::class.java, intent).create()
     }
 
-    /** The first started activity with a link, skipping the app's own launch. */
-    private fun startedLink(): String? {
-        val app = shadowOf(context as Application)
-        while (true) {
-            val next = app.nextStartedActivity ?: return null
-            next.data?.let { return it.toString() }
-        }
-    }
+    
 
     @Test
     fun aLaunchTapsLinkWaitsForTheWrappersHandler() {
         launchTap("myapp://order/1")
         shadowOf(Looper.getMainLooper()).idle()
-        assertNull("nothing opened before the wrapper is ready", startedLink())
+        assertNull("nothing opened before the wrapper is ready", context.startedLink())
 
         var routed: String? = null
         Kirora.setWrapperCallbacks(handleDeepLink = { url -> routed = url; true }, onForegroundNotification = null)
         shadowOf(Looper.getMainLooper()).idle()
         assertEquals("myapp://order/1", routed)
-        assertNull(startedLink())
+        assertNull(context.startedLink())
     }
 
     /** The app's screens, as ProcessLifecycleOwner reports them (Robolectric doesn't drive it). */
@@ -292,7 +285,7 @@ class KiroraPushDisplayTest {
         launchTap("https://shop.example/sale")
         Kirora.setWrapperCallbacks(handleDeepLink = null, onForegroundNotification = null)
         shadowOf(Looper.getMainLooper()).idle()
-        assertEquals("https://shop.example/sale", startedLink())
+        assertEquals("https://shop.example/sale", context.startedLink())
     }
 
     @Test
@@ -300,9 +293,9 @@ class KiroraPushDisplayTest {
         appInForeground()
         launchTap("https://shop.example/sale")
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(9))
-        assertNull(startedLink())
+        assertNull(context.startedLink())
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(2))
-        assertEquals("https://shop.example/sale", startedLink())
+        assertEquals("https://shop.example/sale", context.startedLink())
     }
 
     @Test
@@ -318,10 +311,10 @@ class KiroraPushDisplayTest {
         screens.registry.currentState = androidx.lifecycle.Lifecycle.State.CREATED
         Kirora.setWrapperCallbacks(handleDeepLink = null, onForegroundNotification = null)
         shadowOf(Looper.getMainLooper()).idle()
-        assertNull("not started from the background", startedLink())
+        assertNull("not started from the background", context.startedLink())
         screens.registry.currentState = androidx.lifecycle.Lifecycle.State.STARTED
         shadowOf(Looper.getMainLooper()).idle()
-        assertEquals("https://shop.example/sale", startedLink())
+        assertEquals("https://shop.example/sale", context.startedLink())
     }
 
     @Test
@@ -332,7 +325,7 @@ class KiroraPushDisplayTest {
         Kirora.wrapperDetached()
         launchTap("myapp://order/2")
         shadowOf(Looper.getMainLooper()).idle()
-        assertNull("waits for the next engine", startedLink())
+        assertNull("waits for the next engine", context.startedLink())
         var routed: String? = null
         Kirora.setWrapperCallbacks(handleDeepLink = { url -> routed = url; true }, onForegroundNotification = null)
         shadowOf(Looper.getMainLooper()).idle()

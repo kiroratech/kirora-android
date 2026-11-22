@@ -50,26 +50,36 @@ internal class SessionManager(
     @Volatile
     private var stopped = false
 
-    /** Whether the stored visit and app version have been read: once, by the startup work or the first activity. */
-    @Volatile
+    // [ensureBegun]'s two flags: [begun] when it starts (under the lock, since the visit it tracks
+    // comes back in on the same thread), [ready] when it has finished (the lock-free path after).
     private var begun = false
+
+    @Volatile
+    private var ready = false
 
     /**
      * Reads the stored visit (continuing it or starting one) and the app version, once. Done off
-     * the main thread at start; anything needing the visit before that does it first, and waits.
+     * the main thread at start; anything needing the visit before that does it first, and another
+     * thread doing it meanwhile is waited for.
      */
     fun ensureBegun() {
-        if (begun) return
+        if (ready) return
         synchronized(this) {
             if (begun) return
             begun = true
-            beginTracking()
+            try {
+                beginTracking()
+            } finally {
+                ready = true
+            }
         }
     }
 
     /** Watches the app's lifecycle; the stored visit is read by [ensureBegun]. */
     fun start() {
         runOnMain {
+            // Stopped before this ran (a client made off the main thread, destroyed at once): no observer.
+            if (stopped) return@runOnMain
             val lifecycle = processLifecycle()
             if (watching !== lifecycle) {
                 watching = lifecycle

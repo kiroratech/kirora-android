@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.drawable.AdaptiveIconDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
@@ -238,7 +239,8 @@ internal object KiroraPushDisplay {
         button: Pair<Int, KiroraNotificationButton>?
     ): PendingIntent {
         val intent = Intent(context, KiroraPushTrampolineActivity::class.java).apply {
-            data.forEach { (k, v) -> putExtra(k, v) }
+            // A sender's key named like one of these would pass for the SDK's own (a button tap, say).
+            data.forEach { (k, v) -> if (k !in INTERNAL_EXTRAS) putExtra(k, v) }
             putExtra(KiroraPushTrampolineActivity.EXTRA_NOTIFICATION_ID, notificationId)
             tag?.let { putExtra(KiroraPushTrampolineActivity.EXTRA_NOTIFICATION_TAG, it) }
             if (button != null) {
@@ -269,13 +271,30 @@ internal object KiroraPushDisplay {
         return channel.group?.let { manager.getNotificationChannelGroup(it)?.isBlocked } == true
     }
 
-    /** The app's setting, then the manifest meta-data (`io.kirora.default_notification_icon`, FCM's own), then the launcher icon. */
+    /**
+     * The app's setting, then the manifest meta-data (`io.kirora.default_notification_icon`, FCM's own),
+     * then the launcher icon: the first that Android can draw in the status bar, each looked up only if needed.
+     */
     private fun smallIcon(context: Context, config: PushDisplayConfig): Int =
-        config.smallIconResId
-            ?: metaDataInt(context, META_ICON)
-            ?: metaDataInt(context, FCM_META_ICON)
-            ?: context.applicationInfo.icon.takeIf { it != 0 }
-            ?: android.R.drawable.ic_dialog_info
+        sequenceOf(
+            { config.smallIconResId },
+            { metaDataInt(context, META_ICON) },
+            { metaDataInt(context, FCM_META_ICON) },
+            { context.applicationInfo.icon }
+        ).mapNotNull { it() }.firstOrNull { validIcon(context, it) } ?: android.R.drawable.ic_dialog_info
+
+    /** Android 8.0 ends the app when a notification's small icon is an adaptive icon, as launcher icons often are. */
+    private fun validIcon(context: Context, resId: Int): Boolean {
+        if (resId == 0) return false
+        if (Build.VERSION.SDK_INT != Build.VERSION_CODES.O) return true
+        val adaptive = try {
+            context.resources.getDrawable(resId, null) is AdaptiveIconDrawable
+        } catch (_: Exception) {
+            return false
+        }
+        if (adaptive) KiroraLogger.w("Adaptive icons can't be a notification's small icon on Android 8.0; set smallIconResId.")
+        return !adaptive
+    }
 
     private fun accentColor(context: Context, config: PushDisplayConfig): Int? {
         config.accentColor?.let { return it }

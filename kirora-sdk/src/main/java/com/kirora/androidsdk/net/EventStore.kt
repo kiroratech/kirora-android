@@ -107,10 +107,10 @@ internal class EventStore(
     /** False when the database still holds them (it failed to delete): reading on would find them again. */
     suspend fun remove(keys: Collection<String>): Boolean {
         if (keys.isEmpty()) return true
-        val deleted = dao == null || room(false) { d -> keys.chunked(CHUNK).forEach { d.deleteByKeys(it) }; true }
         val set = keys.toSet()
-        removeFromMemory { it.idempotencyKey in set }
-        return deleted
+        // Held only in memory (the database failing): gone once removed here, whatever Room says.
+        if (removeFromMemory { it.idempotencyKey in set } == set.size) return true
+        return dao == null || room(false) { d -> keys.chunked(CHUNK).forEach { d.deleteByKeys(it) }; true }
     }
 
     /** Drops [owner]'s events. One Room refuses to delete is owed, and never read again until deleted. */

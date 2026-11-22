@@ -53,6 +53,17 @@ internal class KiroraPermissionActivityTest {
     }
 
     @Test
+    fun anInterruptedRequestIsUnansweredNotDenied() {
+        val controller = ask()
+        // Android's answer when the request was cut short: no results at all.
+        controller.get().onRequestPermissionsResult(7301, arrayOf(), intArrayOf())
+        assertEquals(listOf<Boolean?>(null), results)
+        assertTrue(controller.get().isFinishing)
+        controller.destroy()
+        assertEquals(listOf<Boolean?>(null), results)
+    }
+
+    @Test
     fun anAnswerForAnotherRequestCodeIsIgnored() {
         val controller = ask()
         controller.get().onRequestPermissionsResult(1, arrayOf("x"), intArrayOf(PackageManager.PERMISSION_GRANTED))

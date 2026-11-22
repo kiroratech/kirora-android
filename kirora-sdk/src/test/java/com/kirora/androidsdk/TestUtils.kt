@@ -1,6 +1,11 @@
 package com.kirora.androidsdk
 
+import android.app.Application
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
 import android.os.Looper
+import com.kirora.androidsdk.push.KiroraPushTrampolineActivity
 import kotlinx.coroutines.delay
 import org.junit.Assert.fail
 import org.robolectric.Shadows.shadowOf
@@ -32,4 +37,24 @@ internal fun jwt(sub: String?, exp: Long? = null, nonce: String = "", iat: Long?
     }.joinToString(",", "{", "}")
     return encoder.encodeToString("""{"alg":"HS256"}""".toByteArray()) + "." +
         encoder.encodeToString(claims.toByteArray()) + ".sig"
+}
+
+internal val Context.notifications: NotificationManager
+    get() = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+/** The tap screen's intent for a Kirora push with [extras], as the notification starts it. */
+internal fun Context.tapIntent(vararg extras: Pair<String, String>): Intent =
+    Intent(this, KiroraPushTrampolineActivity::class.java).apply {
+        putExtra("kirora", "true")
+        extras.forEach { (k, v) -> putExtra(k, v) }
+        putExtra(KiroraPushTrampolineActivity.EXTRA_NOTIFICATION_ID, 0)
+    }
+
+/** The first started activity with a link, skipping the app's own launch. */
+internal fun Context.startedLink(): String? {
+    val app = shadowOf(applicationContext as Application)
+    while (true) {
+        val next = app.nextStartedActivity ?: return null
+        next.data?.let { return it.toString() }
+    }
 }

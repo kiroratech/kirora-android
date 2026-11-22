@@ -111,8 +111,9 @@ internal class KiroraAppOpenReporter(
     /** Drops what is queued for [subject], as they sign out. */
     fun clearOwnedBy(subject: String) {
         pending = null
-        val d = dao ?: return
+        // The database is opened (on first use) off the caller's thread.
         launchTracked {
+            val d = dao ?: return@launchTracked
             purges.purgeOwner(d, subject)
         }
     }
@@ -124,8 +125,7 @@ internal class KiroraAppOpenReporter(
         preferences.clearLastAppOpen()
         inFlight.forEach { it.cancel() }
         retryJob?.cancel()
-        val d = dao ?: return
-        scope.launch { purges.purgeAll(d) }
+        scope.launch { dao?.let { purges.purgeAll(it) } }
     }
 
     fun destroy() {
@@ -147,13 +147,13 @@ internal class KiroraAppOpenReporter(
     }
 
     private fun record(user: SignedInUser, at: Long) {
-        val d = dao ?: return
         // Only a device registered for push, with the push app it registered with.
         val pushAppId = registeredPushAppId(user.subject) ?: return
         if (withinWindow(at)) return
         lastOpen = at
         if (persistSpacing) preferences.setLastAppOpen(at)
         launchTracked {
+            val d = dao ?: return@launchTracked
             if (!purges.settle(d)) return@launchTracked
             d.insertAndTrim(AppOpenEntity(occurredAt = at, pushAppId = pushAppId, owner = user.subject), MAX_QUEUED)
             doFlush()
@@ -259,12 +259,15 @@ internal class KiroraAppOpenReporter(
         }
         nextRetryAt = clock() + delayMs
         backoffMs = min(backoffMs * 2, MAX_RETRY_MS)
-        // Nothing else may come along to retry, so the retry waits for itself.
-        if (retryJob?.isActive != true && !destroyed) {
-            retryJob = scope.launch {
-                delay(delayMs)
-                flush()
-            }
+        // Nothing else may come along to retry, so the retry waits for itself, re-armed for the
+        // latest hold (a longer Retry-After since): one armed earlier would find the hold and stop.
+        // Safe to replace: the job only starts a flush, which runs on its own.
+        if (destroyed) return
+        val retryAt = max(nextRetryAt, holdUntil)
+        retryJob?.cancel()
+        retryJob = scope.launch {
+            delay(retryAt - clock())
+            flush()
         }
     }
 

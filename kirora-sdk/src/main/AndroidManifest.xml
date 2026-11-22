@@ -4,18 +4,6 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Lets resolveActivity see web browsers on Android 11+, which hides other apps by default. -->
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.VIEW" />
-            <data android:scheme="https" />
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.VIEW" />
-            <data android:scheme="http" />
-        </intent>
-    </queries>
-
     <application>
         <activity
             android:name="com.kirora.androidsdk.push.KiroraPushTrampolineActivity"

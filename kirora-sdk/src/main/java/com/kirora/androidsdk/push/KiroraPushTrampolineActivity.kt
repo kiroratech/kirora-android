@@ -1,6 +1,8 @@
 package com.kirora.androidsdk.push
 
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -98,8 +100,10 @@ internal class KiroraPushTrampolineActivity : Activity() {
         }
         val buttonIndex = if (extras.containsKey(EXTRA_BUTTON_INDEX)) extras.getInt(EXTRA_BUTTON_INDEX) else null
         val buttonUrl = extras.getString(EXTRA_BUTTON_URL)?.takeIf { it.isNotBlank() }
-        // `link` is the push's `actionUrl` in Android's data-only payload.
-        val actionUrl = buttonUrl ?: data["link"]?.takeIf { it.isNotBlank() }
+        // `link` is the push's `actionUrl` in Android's data-only payload; listeners hear it by both names.
+        val link = data["link"]?.takeIf { it.isNotBlank() }
+        link?.let { data[ACTION_URL] = it }
+        val actionUrl = buttonUrl ?: link
 
         // Buttons do not dismiss the notification by themselves.
         if (buttonIndex != null) {
@@ -156,6 +160,7 @@ internal class KiroraPushTrampolineActivity : Activity() {
         const val EXTRA_ACTION_TYPE: String = "kirora_action_type"
         const val EXTRA_NOTIFICATION_TAG: String = "kirora_notification_tag"
         const val EXTRA_NOTIFICATION_ID: String = "kirora_notification_id"
+        private const val ACTION_URL = "actionUrl"
         private val BLOCKED_SCHEMES = setOf("javascript", "file", "content", "intent", "data")
 
         internal fun openable(url: String): Boolean {
@@ -163,7 +168,9 @@ internal class KiroraPushTrampolineActivity : Activity() {
             return scheme !in BLOCKED_SCHEMES
         }
 
-        /** An app link or custom scheme goes to this app first; a web page to whatever opens it. */
+        /** An app link or custom scheme goes to this app first; anything else to whatever opens it. */
+        // resolveActivity asks only about this app's own package, which Android always shows it.
+        @SuppressLint("QueryPermissionsNeeded")
         internal fun openAction(context: Context, url: String): Boolean {
             val packageManager = context.packageManager
             val packageName = context.packageName
@@ -194,10 +201,11 @@ internal class KiroraPushTrampolineActivity : Activity() {
                     context.startActivity(own)
                     return true
                 }
-                if (scheme == "https" || scheme == "http") {
-                    context.startActivity(view)
-                    return true
-                }
+                // Started without asking first: Android 11+ hides the apps that would answer `tel:` or `market:`.
+                context.startActivity(view)
+                return true
+            } catch (_: ActivityNotFoundException) {
+                KiroraLogger.w("Nothing on this device opens the notification's link; opening the app instead.")
             } catch (e: Exception) {
                 KiroraLogger.w("Could not open the notification's link; opening the app instead", e)
             }

@@ -55,6 +55,10 @@ internal class SignedInUser(
     val waitingForToken: Boolean
         get() = refusedToken == token
 
+    /** The expiry the early refresh was last scheduled for, so a token no longer-lived isn't refreshed in a loop. */
+    @Volatile
+    var refreshScheduledFor = 0L
+
     /** Set once Kirora has accepted a call with this user's token. */
     @Volatile
     var confirmed: Boolean = false
@@ -142,6 +146,7 @@ internal class Identity(
     private val calls = AtomicInteger()
     private val refreshMutex = Mutex()
 
+    /** The latest sign-in while it is still under way. */
     @Volatile
     private var signingIn: CompletableDeferred<Unit>? = null
 
@@ -158,9 +163,12 @@ internal class Identity(
      * `sub` signing in again keeps its [SignedInUser], with the new token.
      */
     suspend fun signIn(token: String?, onSignedIn: suspend (previous: SignedInUser?, user: SignedInUser) -> Unit) {
-        val call = calls.incrementAndGet()
         val done = CompletableDeferred<Unit>()
-        signingIn = done
+        // Together, so an older call can never leave its own as the latest sign-in.
+        val call = synchronized(this) {
+            signingIn = done
+            calls.incrementAndGet()
+        }
         try {
             val userToken = token ?: fetchToken()
             val (previous, signedIn) = synchronized(this) {
@@ -178,6 +186,7 @@ internal class Identity(
             onSignedIn(previous, signedIn)
         } finally {
             done.complete(Unit)
+            synchronized(this) { if (signingIn === done) signingIn = null }
         }
     }
 
@@ -186,12 +195,19 @@ internal class Identity(
      * returns them: from here on, new work belongs to no one.
      */
     @Synchronized
-    fun end(): SignedInUser? {
+    fun end(): Ended {
         calls.incrementAndGet()
+        val abandoned = signingIn
+        // No longer under way: nothing waits on it, nothing counts it.
+        abandoned?.complete(Unit)
+        signingIn = null
         val outgoing = user
         user = null
-        return outgoing
+        return Ended(outgoing, abandonedSignIn = abandoned != null)
     }
+
+    /** Who [end] signed out, and whether it abandoned a sign-in still waiting for its token. */
+    class Ended(val user: SignedInUser?, val abandonedSignIn: Boolean)
 
     /** Carries a user over from the client this one replaces, without a new sign-in. */
     @Synchronized
@@ -205,6 +221,10 @@ internal class Identity(
     suspend fun settled() {
         signingIn?.await()
     }
+
+    /** A sign-in under way (waiting for its token, or finishing), which [end] would abandon. */
+    val signInUnderWay: Boolean
+        get() = signingIn?.isCompleted == false
 
     /**
      * A replacement for [signedIn]'s refused token, or null if they are no longer signed in, there

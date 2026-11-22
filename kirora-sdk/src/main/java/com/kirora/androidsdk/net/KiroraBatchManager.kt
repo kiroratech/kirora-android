@@ -198,7 +198,13 @@ internal class KiroraBatchManager(
     /** Sends batch after batch of [user]'s events while [mayStillSend], until the queue is empty or a send fails. */
     private suspend fun deliver(user: SignedInUser, refreshAllowed: Boolean, mayStillSend: () -> Boolean) {
         var maxEvents = MAX_EVENT_BATCH
-        while (mayStillSend()) {
+        // A split already isolated one refused event in this pass: if the next batch splits too,
+        // the refusal is likely about every event (a field they all carry), so stop for now
+        // rather than send one request per event.
+        var isolatedARefusal = false
+        // Every send as this user, the manual flush and the sign-out's included: a token Kirora
+        // refused (with no fetchUserToken) waits for identify(), wherever the refusal was seen.
+        while (mayStillSend() && !user.waitingForToken) {
             val oldest = try {
                 store.oldestFor(user.subject, maxEvents)
             } catch (e: CancellationException) {
@@ -212,6 +218,11 @@ internal class KiroraBatchManager(
             if (batch.isEmpty() || !mayStillSend()) return
             when (val outcome = sendBatch(user, batch, refreshAllowed)) {
                 Outcome.Split -> {
+                    if (isolatedARefusal) {
+                        KiroraLogger.w("Kirora keeps refusing events one at a time; trying again later.")
+                        retryLater()
+                        return
+                    }
                     maxEvents = (batch.size + 1) / 2
                     continue
                 }
@@ -222,6 +233,7 @@ internal class KiroraBatchManager(
                         retryLater()
                         return
                     }
+                    if (outcome.isolated) isolatedARefusal = true
                     // Past the event a split isolated, the rest go in full batches again.
                     maxEvents = MAX_EVENT_BATCH
                     if (outcome.keys.size < batch.size) {
@@ -239,7 +251,8 @@ internal class KiroraBatchManager(
         object Split : Outcome()
         object Stop : Outcome()
         /** [retryAfterMs]: the answer's `Retry-After`, for the events it left unsettled. */
-        class Settled(val keys: Set<String>, val retryAfterMs: Long? = null) : Outcome()
+        /** [isolated]: one event refused on its own after splitting, a hint the refusal may be about every event. */
+        class Settled(val keys: Set<String>, val retryAfterMs: Long? = null, val isolated: Boolean = false) : Outcome()
     }
 
     private suspend fun sendBatch(user: SignedInUser, batch: List<EventEntity>, refreshAllowed: Boolean): Outcome {
@@ -305,7 +318,9 @@ internal class KiroraBatchManager(
         if (error.status == 403 && error.code == PLAN_FEATURE_UNAVAILABLE) return drop(keys, described)
         if (error.status in SPLIT_STATUSES && (error.status == 413 || aboutTheEvents(body))) {
             // Too large or invalid: halve until the bad event stands alone, so the rest still go.
-            return if (keys.size > 1) Outcome.Split else drop(keys, described)
+            if (keys.size > 1) return Outcome.Split
+            drop(keys, described)
+            return Outcome.Settled(keys, isolated = true)
         }
         // Never a refusal of these events: /events/batch answers none of these for a whole
         // request, so it is a wrong apiUrl, a captive portal, a proxy, or a header Kirora refused.
