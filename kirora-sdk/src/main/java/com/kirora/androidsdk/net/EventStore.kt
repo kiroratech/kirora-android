@@ -2,6 +2,8 @@ package com.kirora.androidsdk.net
 
 import com.kirora.androidsdk.db.EventDao
 import com.kirora.androidsdk.db.EventEntity
+import com.kirora.androidsdk.db.adoptedBy
+import com.kirora.androidsdk.db.PurgeTarget
 import com.kirora.androidsdk.db.QueueTotals
 import com.kirora.androidsdk.identity.SignedInUser
 import com.kirora.androidsdk.utils.KiroraLogger
@@ -21,9 +23,12 @@ import kotlinx.coroutines.sync.withLock
  * [purges] and carried out before Room is read again; until then what it covers stays out of reach.
  */
 internal class EventStore(
-    private val dao: EventDao?,
+    /** The database's, or null to keep events in memory; asked for on first use, off the main thread. */
+    daoProvider: () -> EventDao?,
     private val purges: PendingPurges = PendingPurges()
 ) {
+    private val dao: EventDao? by lazy { daoProvider().also { if (it == null) warnInMemory(null) } }
+
     private val memoryLock = Mutex()
     private val memory = ArrayDeque<EventEntity>()
 
@@ -37,16 +42,13 @@ internal class EventStore(
     @Volatile
     private var warned = false
 
-    init {
-        if (dao == null) warnInMemory(null)
-    }
-
     /** Adds [event]; returns how many old events were dropped to stay within the budgets. */
     suspend fun add(event: EventEntity): Int {
-        if (dao != null && purges.settle(dao)) {
+        val d = dao
+        if (d != null && purges.settle(d)) {
             try {
                 moveMemoryToDisk()
-                return dao.insertAndTrim(event, MAX_EVENTS, MAX_BYTES)
+                return d.insertAndTrim(event, MAX_EVENTS, MAX_BYTES)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -87,7 +89,7 @@ internal class EventStore(
         val stored = room(emptyList()) { it.adopt(owner) }
         val held = memoryLock.withLock {
             val keys = ArrayList<String>()
-            memory.replaceAll { e -> if (e.owner == null) e.copy(owner = owner).also { keys.add(e.idempotencyKey) } else e }
+            memory.replaceAll { e -> if (e.owner == null) e.adoptedBy(owner).also { keys.add(e.idempotencyKey) } else e }
             keys
         }
         return stored + held
@@ -102,17 +104,30 @@ internal class EventStore(
         }
     }
 
-    suspend fun remove(keys: Collection<String>) {
-        if (keys.isEmpty()) return
-        room(Unit) { d -> keys.chunked(CHUNK).forEach { d.deleteByKeys(it) } }
+    /** False when the database still holds them (it failed to delete): reading on would find them again. */
+    suspend fun remove(keys: Collection<String>): Boolean {
+        if (keys.isEmpty()) return true
+        val deleted = dao == null || room(false) { d -> keys.chunked(CHUNK).forEach { d.deleteByKeys(it) }; true }
         val set = keys.toSet()
         removeFromMemory { it.idempotencyKey in set }
+        return deleted
     }
 
     /** Drops [owner]'s events. One Room refuses to delete is owed, and never read again until deleted. */
     suspend fun clearOwnedBy(owner: String): Int {
         val stored = dao?.let { purges.purgeOwner(it, owner) } ?: 0
         return stored + removeFromMemory { it.owner == owner }
+    }
+
+    /**
+     * Drops the events waiting from before sign-in, so the next user to sign in never adopts them:
+     * all of them, or with [onlySignedInVisits] only those that continued a signed-in user's visit.
+     */
+    suspend fun clearUnowned(onlySignedInVisits: Boolean): Int {
+        // Owed, durably, when the database refuses: nothing is adopted until it's done.
+        val which = if (onlySignedInVisits) PurgeTarget.UNOWNED_ON_SIGNED_IN_VISITS else PurgeTarget.UNOWNED
+        val stored = dao?.let { purges.purgeOwner(it, which) } ?: 0
+        return stored + removeFromMemory { it.owner == null && (!onlySignedInVisits || it.visitOwner != null) }
     }
 
     suspend fun clearUnnamedExcept(current: String): Int {

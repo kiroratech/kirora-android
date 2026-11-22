@@ -9,6 +9,7 @@ import com.kirora.androidsdk.db.EventDao
 import com.kirora.androidsdk.db.EventEntity
 import com.kirora.androidsdk.db.KiroraDatabase
 import com.kirora.androidsdk.db.QueueTotals
+import com.kirora.androidsdk.model.AuthFailureReason
 import com.kirora.androidsdk.model.KiroraOptions
 import com.kirora.androidsdk.model.KiroraPushOptions
 import com.kirora.androidsdk.net.EventStore
@@ -38,6 +39,7 @@ import org.robolectric.annotation.Config
 import retrofit2.Response
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 
 /** Regression tests for event context, logout, storage failures, retries and client replacement. */
@@ -198,10 +200,50 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         override suspend fun deleteOwnedBy(owner: String): Int = write().let { real.deleteOwnedBy(owner) }
         override suspend fun purgeAll() = write().let { real.purgeAll() }
         override suspend fun purgeOwner(owner: String) = write().let { real.purgeOwner(owner) }
+        override suspend fun deleteByKeys(keys: List<String>) = write().let { real.deleteByKeys(keys) }
         override suspend fun getCount(): Int = read().let { real.getCount() }
         override suspend fun totals(): QueueTotals = read().let { real.totals() }
         override suspend fun countFor(owner: String): Int = read().let { real.countFor(owner) }
         override suspend fun oldestFor(owner: String, limit: Int): List<EventEntity> = read().let { real.oldestFor(owner, limit) }
+    }
+
+    // ---- Codex review, 22 Nov ----------------------------------------------------------------
+
+    @Test
+    fun aSignOutDeletionTheDatabaseRefusesIsOwedSoNoOneAdoptsThem() = runBlocking {
+        val database = newDatabase()
+        val dao = FlakyDao(database.eventDao())
+        var saved: String? = null
+        val store = EventStore({ dao }, PendingPurges({ saved }, { saved = it; true }))
+        store.add(event(1L, owner = null))
+
+        dao.failWrites = true
+        store.clearUnowned(onlySignedInVisits = false)
+        dao.failWrites = false
+        // The next user signs in once storage recovers: the owed deletion goes first.
+        assertEquals("nothing left to adopt", emptyList<String>(), store.adopt("user-b"))
+        assertEquals(0, database.eventDao().getCount())
+        assertNull("nothing owed any more", saved)
+    }
+
+    @Test
+    fun aSecondCallerWaitsForWhatIsOwedToBeRead() {
+        val reading = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val purges = PendingPurges({
+            reading.countDown()
+            release.await()
+            """{"all":true}"""
+        })
+        val first = Thread { purges.isEmpty }.apply { start() }
+        reading.await()
+        var seen: Boolean? = null
+        val second = Thread { seen = purges.isEmpty }.apply { start() }
+        Thread.sleep(100)
+        release.countDown()
+        first.join()
+        second.join()
+        assertEquals("a deletion is owed, never 'nothing owed' mid-read", false, seen)
     }
 
     private fun newDatabase(): KiroraDatabase =
@@ -223,7 +265,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         val dao = FlakyDao(database.eventDao())
         var saved: String? = null
         val ledger = { PendingPurges({ saved }, { saved = it; true }) }
-        val store = EventStore(dao, ledger())
+        val store = EventStore({ dao }, ledger())
         // Dated a day ahead (the clock was ahead when they were tracked): still withdrawn.
         val ahead = System.currentTimeMillis() + 86_400_000L
         repeat(1000) { store.add(event(ahead + it)) }
@@ -234,7 +276,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         assertEquals(0, store.oldestFor("user-a", 100).size)
 
         // A restart with storage still failing, then storage recovering: they never come back.
-        val restarted = EventStore(dao, ledger())
+        val restarted = EventStore({ dao }, ledger())
         assertEquals(0, restarted.count())
         dao.failWrites = false
         assertEquals(0, restarted.count())
@@ -250,7 +292,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
     @Test
     fun aRefusedSignOutPurgeKeepsThatUsersEventsFromComingBack() = runBlocking {
         val dao = FlakyDao(newDatabase().eventDao())
-        val store = EventStore(dao)
+        val store = EventStore({ dao })
         repeat(10) { store.add(event(1_000L + it, owner = "user-a")) }
         store.add(event(2_000L, owner = "user-b"))
         dao.failWrites = true
@@ -267,7 +309,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
     @Test
     fun diskAndMemoryShareOneBudget() = runBlocking {
         val dao = FlakyDao(newDatabase().eventDao())
-        val store = EventStore(dao)
+        val store = EventStore({ dao })
         repeat(EventStore.MAX_EVENTS) { store.add(event(1_000L + it)) }
         // Readable, but refusing writes: the memory fallback gets no second budget.
         dao.failWrites = true
@@ -281,7 +323,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
     fun eventsHeldInMemoryJoinTheDatabaseInCaptureOrderOnceItRecovers() = runBlocking {
         val database = newDatabase()
         val dao = FlakyDao(database.eventDao())
-        val store = EventStore(dao)
+        val store = EventStore({ dao })
         store.add(event(1_000L))
         dao.failWrites = true
         store.add(event(2_000L))
@@ -290,6 +332,41 @@ internal class ReviewFindingsTest : KiroraTestBase() {
         store.add(event(3_000L))
         assertEquals(3, database.eventDao().getCount())
         assertEquals(listOf(1_000L, 2_000L, 3_000L), store.oldestFor("user-a", 10).map { it.occurredAt })
+    }
+
+    @Test
+    fun aDeleteRoomRefusesIsReportedSoTheSameEventsArentSentAgainAtOnce() = runBlocking {
+        val dao = FlakyDao(newDatabase().eventDao())
+        val store = EventStore({ dao })
+        val e = event(1_000L)
+        store.add(e)
+        dao.failWrites = true
+        assertFalse(store.remove(listOf(e.idempotencyKey)))
+        dao.failWrites = false
+        assertTrue(store.remove(listOf(e.idempotencyKey)))
+        assertEquals(0, store.count())
+        assertTrue("nothing to remove", store.remove(emptyList()))
+        assertTrue("memory only", EventStore({ null }).remove(listOf("k")))
+    }
+
+    @Test
+    fun retryAfterOnASuccessfulAnswerHoldsBackTheEventsItLeftUnsettled() = runBlocking {
+        val kirora = start()
+        kirora.identify(tokenA)
+        fake.batchResponder = { request, _ ->
+            FakeKiroraApiService.accepted(request, refuse = request.events.associate { it.name to "RATE_LIMITED" }, retryAfterSeconds = 7200)
+        }
+        kirora.track("Limited")
+        kirora.waitQueued(1)
+        kirora.flush()
+        waitUntil(message = "the first batch") { fake.batchRequests.size == 1 }
+        fake.batchResponder = null
+        // Neither the app's flush() nor coming back online goes before the server's Retry-After.
+        kirora.batchManager!!.flush(waiveBackoff = true)
+        kirora.batchManager!!.onNetworkAvailable()
+        delay(200)
+        assertEquals("nothing sent before Retry-After", 1, fake.batchRequests.size)
+        assertEquals(1, kirora.queued())
     }
 
     // ---- per-event results ----------------------------------------------------------------
@@ -350,6 +427,35 @@ internal class ReviewFindingsTest : KiroraTestBase() {
     }
 
     // ---- replacement clients ----------------------------------------------------------------
+
+    @Test
+    fun aFailureHeldWhileTheReplacedClientWasSigningInReachesTheNewClient() = runBlocking {
+        GlobalPreferences(context).setPushToken("fcm-1")
+        val old = start(withPush)
+        val release = CompletableDeferred<Unit>()
+        fake.deviceResponder = {
+            release.await()
+            Response.success(DataEnvelope(DeviceAnswer(lastSeenAt = "2026-11-17T09:00:00.000Z")))
+        }
+        val oldSignIn = launch(Dispatchers.Default) { runCatching { old.identify(tokenA) } }
+        waitUntil(message = "the old client's PUT") { fake.deviceRegistrations.size == 1 }
+
+        // Replaced mid-sign-in (a hot reload): the new client carries the user, and its first send is refused.
+        val failures = CopyOnWriteArrayList<AuthFailureReason>()
+        val replacement = start(KiroraOptions(trackSessions = false, onAuthenticationFailed = { failures.add(it) }))
+        assertTrue(replacement.isIdentified)
+        fake.batchResponder = { _, _ -> FakeKiroraApiService.error(401, "UNAUTHORIZED") }
+        replacement.track("E")
+        replacement.waitQueued(1)
+        replacement.flush()
+        waitUntil(message = "the refused batch") { fake.batchRequests.isNotEmpty() }
+        delay(100)
+        assertTrue("held while the old client's identify() runs", failures.isEmpty())
+
+        release.complete(Unit)
+        oldSignIn.join()
+        waitUntilOnMain(message = "the failure, reported by the new client") { failures.toList() == listOf(AuthFailureReason.REFUSED) }
+    }
 
     @Test
     fun aClientForAnotherWorkspaceOrApiStartsSignedOut() = runBlocking {

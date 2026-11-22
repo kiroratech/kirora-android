@@ -16,6 +16,7 @@ import android.os.Looper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.net.toUri
@@ -85,13 +86,7 @@ internal object KiroraPushDisplay {
     ): Boolean {
         if (!isKiroraPush(data)) return false
         KiroraLogger.d("Push message received.")
-        listeners.foreground.forEach { listener ->
-            try {
-                listener(data)
-            } catch (e: Exception) {
-                KiroraLogger.e("Error in foreground notification listener", e)
-            }
-        }
+        listeners.foreground.forEach { listener -> Kirora.appCallback("foreground notification listener") { listener(data) } }
         if (isAppInForeground()) {
             val show = try {
                 foregroundHook?.invoke(data) ?: askWrapper(data)
@@ -143,15 +138,30 @@ internal object KiroraPushDisplay {
 
     /** Creates the default channel; done at start so the app can see and tune it. */
     fun ensureDefaultChannel(context: Context, config: PushDisplayConfig) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-        if (manager.getNotificationChannel(config.channelId) == null) {
-            manager.createNotificationChannel(
-                NotificationChannel(config.channelId, config.channelName, NotificationManager.IMPORTANCE_HIGH).apply {
-                    description = "Push notifications"
-                }
-            )
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) notifications(context)?.let { channelFor(it, null, config) }
+    }
+
+    /**
+     * Whether the user turned off Kirora's default channel (or its group) in the system settings:
+     * nothing on it is shown, and only the settings can change that. False before Android 8, which
+     * has no channels, and while the channel doesn't exist yet. Never creates it.
+     */
+    fun defaultChannelBlocked(context: Context, config: PushDisplayConfig): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        val manager = notifications(context) ?: return false
+        val channel = manager.getNotificationChannel(config.channelId) ?: return false
+        return blocked(manager, channel)
+    }
+
+    /** The channel [requested] names, if the app made it; else the default one, created if need be. */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun channelFor(manager: NotificationManager, requested: String?, config: PushDisplayConfig): NotificationChannel? {
+        requested?.takeIf { it.isNotBlank() }?.let(manager::getNotificationChannel)?.let { return it }
+        return manager.getNotificationChannel(config.channelId)
+            ?: NotificationChannel(config.channelId, config.channelName, NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Push notifications"
+                manager.createNotificationChannel(this)
+            }
     }
 
     /** Blocks for the image (a few seconds at most): the push service may be stopped as soon as it returns. */
@@ -162,11 +172,17 @@ internal object KiroraPushDisplay {
         val body = data["body"]
         if (title.isNullOrBlank() && body.isNullOrBlank()) return
 
-        val requested = data["channelId"]
-        val channelId = if (!requested.isNullOrBlank() && channelExists(context, requested)) {
-            requested
+        // Android 8+ draws a push on a channel; before, there are none.
+        val channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = notifications(context)
+            val channel = manager?.let { channelFor(it, data["channelId"], config) }
+            if (manager != null && channel != null && blocked(manager, channel)) {
+                // Posting succeeds but nothing appears: not shown, so not reported as delivered.
+                KiroraLogger.d("Push not shown: its notification channel is turned off.")
+                return
+            }
+            channel?.id ?: config.channelId
         } else {
-            ensureDefaultChannel(context, config)
             config.channelId
         }
 
@@ -242,10 +258,15 @@ internal object KiroraPushDisplay {
         )
     }
 
-    private fun channelExists(context: Context, channelId: String): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-        return manager?.getNotificationChannel(channelId) != null
+    private fun notifications(context: Context): NotificationManager? =
+        context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+
+    /** The user turned off [channel], or (Android 9+) its group, in the system settings. */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun blocked(manager: NotificationManager, channel: NotificationChannel): Boolean {
+        if (channel.importance == NotificationManager.IMPORTANCE_NONE) return true
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        return channel.group?.let { manager.getNotificationChannelGroup(it)?.isBlocked } == true
     }
 
     /** The app's setting, then the manifest meta-data (`io.kirora.default_notification_icon`, FCM's own), then the launcher icon. */

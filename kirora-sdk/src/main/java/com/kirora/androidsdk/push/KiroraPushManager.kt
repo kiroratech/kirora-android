@@ -22,6 +22,7 @@ import com.kirora.androidsdk.net.models.PushApp
 import com.kirora.androidsdk.utils.GlobalPreferences
 import com.kirora.androidsdk.utils.KiroraLogger
 import com.kirora.androidsdk.utils.KiroraPreferences
+import com.kirora.androidsdk.utils.PendingDetach
 import com.kirora.androidsdk.utils.PushRegistration
 import com.kirora.androidsdk.utils.RegistrationDetails
 import com.kirora.androidsdk.utils.toApiError
@@ -54,7 +55,7 @@ internal class KiroraPushManager(
     private val context: Context,
     private val preferences: KiroraPreferences,
     private val global: GlobalPreferences,
-    @Volatile private var apiService: KiroraApiService,
+    private val apiService: KiroraApiService,
     private val scope: CoroutineScope,
     private val identity: Identity,
     private val pushOptions: KiroraPushOptions?,
@@ -77,23 +78,30 @@ internal class KiroraPushManager(
     @Volatile
     private var destroyed = false
 
-    /** A signed-out user's detachment, retried in the background with their token, kept in memory only. */
+    /**
+     * A signed-out user's detachment, retried in the background with their [token] (memory only)
+     * or, with none held, the installation's device [secret]. Also kept on the device
+     * ([persisted]), so it's retried with the secret after a restart.
+     */
     private class Cleanup(
-        val user: SignedInUser,
-        val token: String,
+        /** Dropped for [secret] once Kirora refuses it (it expired while retrying, say). */
+        @Volatile var token: String?,
         val installationId: String,
-        val pushAppId: String?,
         /** The last successful registration's, so a late retry can't undo a newer registration. */
         val lastSeenAt: String?,
+        val secret: String,
         val giveUpAt: Long
     ) {
         var retryDelayMs = FIRST_CLEANUP_RETRY_MS
         var job: Job? = null
+
+        val authorization: String
+            get() = token?.let { "Bearer $it" } ?: "Device $secret"
+
+        val persisted: PendingDetach
+            get() = PendingDetach(installationId, lastSeenAt, secret, giveUpAt)
     }
 
-    fun updateApiService(newApiService: KiroraApiService) {
-        apiService = newApiService
-    }
 
     fun isKiroraPush(data: Map<String, String>): Boolean = KiroraPushDisplay.isKiroraPush(data)
 
@@ -145,6 +153,8 @@ internal class KiroraPushManager(
 
     private suspend fun registerAs(user: SignedInUser) {
         if (destroyed || identity.user !== user || preferences.isPushDisabled()) return
+        // Kirora refused their token and nothing can replace it but identify(): quietly not now.
+        if (user.waitingForToken) return
         val details = registrationDetails()
         val detailsKey = details.key()
         if (!notificationsEnabled()) return reportDenied(user, details, detailsKey)
@@ -171,6 +181,7 @@ internal class KiroraPushManager(
             permission = GRANTED,
             targetKind = FCM_TOKEN,
             target = token,
+            deviceSecret = preferences.getDeviceSecret(),
             appVersion = details.appVersion,
             osVersion = details.osVersion,
             locale = details.locale,
@@ -209,6 +220,7 @@ internal class KiroraPushManager(
             pushAppId = last.pushAppId,
             permission = DENIED,
             lastSeenAt = lastSeenAt,
+            deviceSecret = preferences.getDeviceSecret(),
             appVersion = details.appVersion,
             osVersion = details.osVersion,
             locale = details.locale,
@@ -246,14 +258,9 @@ internal class KiroraPushManager(
         return response.body()?.data?.takeIf { !it.pushAppId.isNullOrEmpty() }
     }
 
-    /** Calls with [user]'s token, asking for a fresh one once on 401. */
-    private suspend fun <T> authorized(user: SignedInUser, call: suspend (authorization: String) -> Response<T>): Response<T> {
-        val token = user.token
-        val response = call("Bearer $token")
-        if (response.code() != 401) return response
-        val fresh = identity.refresh(user, token) ?: return response
-        return call("Bearer $fresh")
-    }
+    /** [Identity.authorized], with a token waiting for identify() answered as Kirora would: 401. */
+    private suspend fun <T> authorized(user: SignedInUser, call: suspend (authorization: String) -> Response<T>): Response<T> =
+        identity.authorized(user, call) ?: throw KiroraApiError(401, "UNAUTHORIZED", "Kirora refused the user token: call identify() with a new one")
 
     private suspend fun fetchFcmToken(): String? {
         val b = bridge
@@ -273,13 +280,18 @@ internal class KiroraPushManager(
 
     // ---- Status and the device's own choice ------------------------------------------------
 
-    /** Never prompts. The platform's permission first; with it granted, whether [user] is registered here. */
+    /**
+     * Never prompts. The platform's permission first (Kirora's default channel turned off counts as
+     * denied); with it granted, whether [user] is registered here.
+     */
     suspend fun status(user: SignedInUser?): PushStatus {
         if (!pushEnabled || bridge == null) return PushStatus.UNSUPPORTED
         if (!notificationsEnabled()) {
             val prompted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || preferences.wasPermissionDenied() || runtimePermissionGranted()
             return if (prompted) PushStatus.DENIED else PushStatus.UNANSWERED
         }
+        // Kirora's channel turned off: nothing is shown, and only the system settings can change that.
+        if (defaultChannelBlocked()) return PushStatus.DENIED
         // Waits for a registration or detachment under way.
         operations.withLock { }
         val last = preferences.getPushRegistration()
@@ -299,7 +311,8 @@ internal class KiroraPushManager(
             return
         }
         preferences.setPushDisabled(true)
-        if (user != null) detach(user, deadline = null)
+        // With nobody signed in (after a relaunch, before identify()), by the device secret.
+        if (user != null) detach(user, deadline = null) else detachLastRegistration(deadline = null)
     }
 
     /**
@@ -324,7 +337,7 @@ internal class KiroraPushManager(
 
     /** True while the device id is still needed: a registration or a detachment still to finish. */
     val needsDeviceId: Boolean
-        get() = preferences.getPushRegistration() != null || cleanups.isNotEmpty()
+        get() = preferences.getPushRegistration() != null || cleanups.isNotEmpty() || preferences.getPendingDetaches().isNotEmpty()
 
     // ---- Detachment -----------------------------------------------------------------------
 
@@ -334,13 +347,27 @@ internal class KiroraPushManager(
      * by [deadline] (epoch ms) when given. A network error, 429 or 5xx is retried in the
      * background: 30 seconds, doubling to 5 minutes, never sooner than `Retry-After`, for 24 hours.
      */
-    suspend fun detach(user: SignedInUser, deadline: Long?) {
+    suspend fun detach(user: SignedInUser, deadline: Long?) = detachCaptured(deadline) { captureCleanup(user) }
+
+    /**
+     * [detach] with nobody signed in (a sign-out after a relaunch, before `identify()`): the
+     * device's last registration, whoever made it, by its device secret.
+     */
+    suspend fun detachLastRegistration(deadline: Long?) = detachCaptured(deadline) {
+        val last = preferences.getPushRegistration() ?: return@detachCaptured null
+        // Made by whoever signed in meanwhile (an identify() while logout() waited): theirs, not to detach.
+        if (identity.user?.subject == last.userSubject) return@detachCaptured null
+        // Every registration sent the installation's secret, so it can be detached by it.
+        capture(null, last)
+    }
+
+    private suspend fun detachCaptured(deadline: Long?, capture: () -> Cleanup?) {
         if (!pushEnabled) return
         // Not cancelled with the caller: behind a registration still under way (a token refresh,
         // say), it must still detach what that registration leaves, whenever it finishes.
         val work = scope.launch {
             operations.withLock {
-                val cleanup = captureCleanup(user) ?: return@withLock
+                val cleanup = capture() ?: return@withLock
                 val remaining = deadline?.let { it - clock() }
                 if (remaining == null || remaining <= 0) {
                     // Nobody is waiting any more: a background attempt, retried as usual.
@@ -365,19 +392,51 @@ internal class KiroraPushManager(
         val last = preferences.getPushRegistration()
         // Registered for someone else since: not this user's to detach.
         if (last == null || last.userSubject != user.subject) return null
-        val cleanup = Cleanup(user, user.token, preferences.getDeviceId(), last.pushAppId, last.lastSeenAt, clock() + CLEANUP_GIVE_UP_MS)
+        // A token Kirora already refused would only be refused again: straight to the device secret.
+        return capture(if (user.waitingForToken) null else user.token, last)
+    }
+
+    private fun capture(token: String?, last: PushRegistration): Cleanup {
+        val cleanup = Cleanup(token, preferences.getDeviceId(), last.lastSeenAt, preferences.getDeviceSecret(), clock() + CLEANUP_GIVE_UP_MS)
         cleanups.add(cleanup)
+        // Kept on the device before the first attempt, so even a process ended now retries it.
+        preferences.updatePendingDetach(cleanup.persisted, add = true)
         // Forgotten now, whatever the first attempt does: the user signing in again must register
         // again, and that registration finishes this cleanup instead of being undone by it.
         preferences.setPushRegistration(null)
         return cleanup
     }
 
+    /** Finished, whatever the outcome: neither retried here nor after a restart. */
+    private fun finish(cleanup: Cleanup) {
+        cleanups.remove(cleanup)
+        preferences.updatePendingDetach(cleanup.persisted, add = false)
+    }
+
+    /**
+     * Resumes the detachments a previous process left unfinished, with their device secrets, within
+     * the 24 hours from each sign-out.
+     */
+    fun resumePendingDetaches() {
+        if (!pushEnabled) return
+        val now = clock()
+        preferences.getPendingDetaches().forEach { pending ->
+            if (cleanups.any { it.persisted.sameAs(pending) }) return@forEach
+            val cleanup = Cleanup(null, pending.installationId, pending.lastSeenAt, pending.secret, pending.giveUpAt)
+            if (now >= pending.giveUpAt) {
+                finish(cleanup)
+                return@forEach
+            }
+            cleanups.add(cleanup)
+            scope.launch { operations.withLock { attemptCleanup(cleanup, first = true) } }
+        }
+    }
+
     private suspend fun attemptCleanup(cleanup: Cleanup, first: Boolean) {
         // Done meanwhile, by a registration that took the device over.
         if (cleanup !in cleanups || destroyed) return
         val error: KiroraApiError? = try {
-            val response = apiService.deleteDevice(cleanup.installationId, cleanup.lastSeenAt, "Bearer ${cleanup.token}")
+            val response = apiService.deleteDevice(cleanup.installationId, cleanup.lastSeenAt, cleanup.authorization)
             when {
                 response.isSuccessful -> null
                 // The user registered this device again since: that registration stays, and Kirora
@@ -393,14 +452,21 @@ internal class KiroraPushManager(
         } catch (e: Exception) {
             KiroraApiError(0, null, "Network error: ${e.javaClass.simpleName}")
         }
+        // The user's token refused: on at once with the device secret. (A 401 to the
+        // secret itself is terminal: one matching nothing answers 204, so this can't loop.)
+        if (error?.status == 401 && cleanup.token != null) {
+            cleanup.token = null
+            KiroraLogger.d("The signed-out user's token was refused; detaching with the device secret.")
+            return attemptCleanup(cleanup, first)
+        }
         if (error == null) {
-            cleanups.remove(cleanup)
+            finish(cleanup)
             KiroraLogger.d("Detached this device from the signed-out user.")
             return
         }
         // A network error (status 0), 429 or 5xx is worth repeating; 401, 403, 404 or any other refusal is not.
         if (error.status != 0 && !error.retryable) {
-            cleanups.remove(cleanup)
+            finish(cleanup)
             KiroraLogger.e("Couldn't detach this device from the signed-out user: HTTP ${error.status}")
             return
         }
@@ -412,7 +478,7 @@ internal class KiroraPushManager(
         if (destroyed || cleanup !in cleanups) return
         val waitMs = max(cleanup.retryDelayMs, retryAfterMs ?: 0L)
         if (clock() + waitMs > cleanup.giveUpAt) {
-            cleanups.remove(cleanup)
+            finish(cleanup)
             KiroraLogger.e("Gave up detaching this device from the signed-out user after 24 hours.")
             return
         }
@@ -480,6 +546,12 @@ internal class KiroraPushManager(
     private fun runtimePermissionGranted(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    private fun defaultChannelBlocked(): Boolean = try {
+        KiroraPushDisplay.defaultChannelBlocked(context, PushDisplayConfig.of(pushOptions))
+    } catch (_: Throwable) {
+        false
+    }
 
     private fun notificationsEnabled(): Boolean = try {
         NotificationManagerCompat.from(context).areNotificationsEnabled()

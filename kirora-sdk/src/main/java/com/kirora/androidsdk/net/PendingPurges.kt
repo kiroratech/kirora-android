@@ -17,7 +17,7 @@ import org.json.JSONObject
  * later grant or sign-in are never caught by it. No time or row number is needed.
  */
 internal class PendingPurges(
-    load: () -> String? = { null },
+    private val load: () -> String? = { null },
     private val save: (String?) -> Boolean = { true },
     /** After a failed attempt, how long before the next: a broken database isn't retried on every call. */
     private val retryIntervalMs: Long = 0L,
@@ -34,10 +34,20 @@ internal class PendingPurges(
 
     /** Read on every database call, so kept apart from the lock that [persist] writes under. */
     @Volatile
-    var isEmpty: Boolean = true
-        private set
+    private var empty: Boolean = true
 
-    init {
+    val isEmpty: Boolean
+        get() {
+            ensureLoaded()
+            return empty
+        }
+
+    /** What is owed, read from storage on first use rather than at construction. Published only once read. */
+    private val owedRead = lazy(this) { readOwed() }
+
+    private fun ensureLoaded() = owedRead.value
+
+    private fun readOwed() {
         try {
             load()?.let { text ->
                 val json = JSONObject(text)
@@ -53,6 +63,7 @@ internal class PendingPurges(
     /** Every row is owed a deletion. */
     @Synchronized
     private fun oweAll() {
+        ensureLoaded()
         all = true
         owners.clear()
         version++
@@ -62,6 +73,7 @@ internal class PendingPurges(
     /** [owner]'s rows are owed a deletion. */
     @Synchronized
     private fun oweFor(owner: String) {
+        ensureLoaded()
         if (all) return
         owners.add(owner)
         version++
@@ -92,7 +104,7 @@ internal class PendingPurges(
                 owners.clear()
                 persist()
             }
-            return isEmpty
+            return empty
         }
     }
 
@@ -122,12 +134,12 @@ internal class PendingPurges(
 
     /** Called under the lock. */
     private fun updateEmpty() {
-        isEmpty = !all && owners.isEmpty()
+        empty = !all && owners.isEmpty()
     }
 
     private fun persist() {
         updateEmpty()
-        val text = if (isEmpty) {
+        val text = if (empty) {
             null
         } else {
             JSONObject().apply {

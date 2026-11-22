@@ -72,12 +72,13 @@ internal class ErrorsTest : KiroraTestBase() {
         assertEquals("SERVICE_UNAVAILABLE", refused.code)
         assertEquals(7_000L, refused.retryAfterMs)
 
-        fake.consentResponder = { FakeKiroraApiService.error(401, "UNAUTHORIZED") }
-        assertEquals(401, thrown<KiroraApiError> { runBlocking { kirora.setPushConsent(true) } }.status)
-
         fake.consentResponder = { throw IOException("offline") }
         val offline = thrown<KiroraError> { runBlocking { kirora.setPushConsent(true) } }
         assertTrue(offline !is KiroraApiError && offline.cause is IOException)
+
+        // Last: with no fetchUserToken, a refused token isn't sent again until identify() gives another.
+        fake.consentResponder = { FakeKiroraApiService.error(401, "UNAUTHORIZED") }
+        assertEquals(401, thrown<KiroraApiError> { runBlocking { kirora.setPushConsent(true) } }.status)
         assertFalse(kirora.pushConsent)
     }
 
@@ -322,10 +323,13 @@ internal class ErrorsTest : KiroraTestBase() {
     @Test
     fun aRefreshThatFailsOnceTheTokenHasExpiredIsReported() = runBlocking {
         Kirora.minRefreshDelayMs = 10
+        Kirora.refreshRetryMs = 10
         val (options, seen) = authFailures { throw IOException("down") }
         val kirora = start(options)
-        kirora.identify(jwt("user-a", exp = System.currentTimeMillis() / 1000 - 5))
-        waitUntilOnMain(message = "the report") { seen.isNotEmpty() }
+        // A 2-second lifetime, counted from its arrival: refreshing is due at once, and fails past it.
+        val now = System.currentTimeMillis() / 1000
+        kirora.identify(jwt("user-a", iat = now - 10, exp = now - 8))
+        waitUntilOnMain(timeoutMs = 10_000, message = "the report") { seen.isNotEmpty() }
         assertEquals(listOf(AuthFailureReason.FETCH_FAILED), seen.toList())
     }
 }

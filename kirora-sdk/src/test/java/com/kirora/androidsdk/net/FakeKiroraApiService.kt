@@ -85,9 +85,16 @@ internal open class FakeKiroraApiService : KiroraApiService {
     val sentEventNames: List<String>
         get() = batchRequests.flatMap { r -> r.events.map { it.name } }
 
+    /** The last event named [name] that was sent. */
+    fun sentEvent(name: String) = batchRequests.flatMap { it.events }.last { it.name == name }
+
     companion object {
-        /** Every event recorded, as Kirora answers a good batch. */
-        fun accepted(request: BatchEventsRequest, refuse: Map<String, String> = emptyMap()): Response<JsonElement> {
+        /** Every event recorded, as Kirora answers a good batch; [refuse] names events answered with an error code. */
+        fun accepted(
+            request: BatchEventsRequest,
+            refuse: Map<String, String> = emptyMap(),
+            retryAfterSeconds: Long? = null
+        ): Response<JsonElement> {
             val results = JsonArray()
             request.events.forEach { event ->
                 results.add(JsonObject().apply {
@@ -105,8 +112,16 @@ internal open class FakeKiroraApiService : KiroraApiService {
                 })
             }
             val body: JsonElement = JsonObject().apply { add("data", JsonObject().apply { add("results", results) }) }
-            return Response.success(body)
+            return Response.success(body, raw(200, retryAfterSeconds))
         }
+
+        private fun raw(status: Int, retryAfterSeconds: Long?): okhttp3.Response = okhttp3.Response.Builder()
+            .code(status)
+            .message("x")
+            .protocol(okhttp3.Protocol.HTTP_1_1)
+            .request(okhttp3.Request.Builder().url("https://api.kirora.io/").build())
+            .headers(if (retryAfterSeconds != null) headersOf("Retry-After", retryAfterSeconds.toString()) else headersOf())
+            .build()
 
         fun <T> error(status: Int, code: String = "ERROR", retryAfterSeconds: Long? = null): Response<T> =
             errorWithBody(status, """{"error":{"code":"$code","message":"x"}}""", retryAfterSeconds)
@@ -114,14 +129,7 @@ internal open class FakeKiroraApiService : KiroraApiService {
         /** An answer of [status] with [json] as its error body. */
         fun <T> errorWithBody(status: Int, json: String, retryAfterSeconds: Long? = null): Response<T> {
             val body = json.toResponseBody("application/json".toMediaType())
-            val raw = okhttp3.Response.Builder()
-                .code(status)
-                .message("x")
-                .protocol(okhttp3.Protocol.HTTP_1_1)
-                .request(okhttp3.Request.Builder().url("https://api.kirora.io/").build())
-                .headers(if (retryAfterSeconds != null) headersOf("Retry-After", retryAfterSeconds.toString()) else headersOf())
-                .build()
-            return Response.error(body, raw)
+            return Response.error(body, raw(status, retryAfterSeconds))
         }
     }
 }

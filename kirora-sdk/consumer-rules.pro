@@ -15,9 +15,8 @@
 }
 -keep class com.kirora.androidsdk.net.models.** { *; }
 
-# Keep Room database entities and DAOs
--keep class * extends androidx.room.RoomDatabase
--keep @androidx.room.Dao interface * { *; }
+# Keep Room database entities and DAOs. Our package only: Room ships its own rules, and a
+# global keep would stop R8 shrinking the app's own databases.
 -keep class com.kirora.androidsdk.db.** { *; }
 
 # Keep Retrofit API interfaces

@@ -15,6 +15,7 @@ import com.kirora.androidsdk.net.models.BatchEventsRequest
 import com.kirora.androidsdk.net.models.KiroraEventApiDto
 import com.kirora.androidsdk.utils.JsonSnapshot
 import com.kirora.androidsdk.utils.KiroraLogger
+import com.kirora.androidsdk.utils.RetryAfter
 import com.kirora.androidsdk.utils.data
 import com.kirora.androidsdk.utils.errorCode
 import com.kirora.androidsdk.utils.errorObject
@@ -51,7 +52,7 @@ import kotlin.random.Random
  */
 internal class KiroraBatchManager(
     private val store: EventStore,
-    @Volatile private var apiService: KiroraApiService,
+    private val apiService: KiroraApiService,
     private val scope: CoroutineScope,
     private val identity: Identity,
     private val trackingAllowed: () -> Boolean,
@@ -93,9 +94,6 @@ internal class KiroraBatchManager(
     private var timer: Job? = null
     private var timerAt = 0L
 
-    fun updateApiService(service: KiroraApiService) {
-        apiService = service
-    }
 
     /** After an event is queued: send at once if 20 wait, otherwise within 30 seconds. */
     fun onEventQueued() {
@@ -219,12 +217,16 @@ internal class KiroraBatchManager(
                 }
                 Outcome.Stop -> return
                 is Outcome.Settled -> {
-                    store.remove(outcome.keys)
+                    if (!store.remove(outcome.keys)) {
+                        // Still stored: sending on would only post the same events again at once.
+                        retryLater()
+                        return
+                    }
                     // Past the event a split isolated, the rest go in full batches again.
                     maxEvents = MAX_EVENT_BATCH
                     if (outcome.keys.size < batch.size) {
                         KiroraLogger.d("Retrying ${batch.size - outcome.keys.size} events later")
-                        retryLater(null)
+                        retryLater(outcome.retryAfterMs ?: 0L)
                         return
                     }
                     resetBackoff()
@@ -236,7 +238,8 @@ internal class KiroraBatchManager(
     private sealed class Outcome {
         object Split : Outcome()
         object Stop : Outcome()
-        class Settled(val keys: Set<String>) : Outcome()
+        /** [retryAfterMs]: the answer's `Retry-After`, for the events it left unsettled. */
+        class Settled(val keys: Set<String>, val retryAfterMs: Long? = null) : Outcome()
     }
 
     private suspend fun sendBatch(user: SignedInUser, batch: List<EventEntity>, refreshAllowed: Boolean): Outcome {
@@ -251,7 +254,7 @@ internal class KiroraBatchManager(
             } catch (e: UserTokenError) {
                 KiroraLogger.e(e.message ?: "fetchUserToken failed", e.cause)
                 onAuthFailure(AuthFailureReason.FETCH_FAILED, user)
-                retryLater(null)
+                retryLater()
                 return Outcome.Stop
             }
             if (fresh != null && fresh != token) {
@@ -265,7 +268,7 @@ internal class KiroraBatchManager(
         if (response.isSuccessful) {
             user.accepted()
             refusedToken = null
-            return Outcome.Settled(acknowledged(response.body(), keys))
+            return Outcome.Settled(acknowledged(response.body(), keys), RetryAfter.parse(response.headers(), clock()))
         }
         val body = response.errorObject()
         return classifyFailure(response.toApiError(body), body, keys, user, sentWith)
@@ -278,14 +281,14 @@ internal class KiroraBatchManager(
         throw e
     } catch (e: Exception) {
         KiroraLogger.d("Events will be retried: ${e.javaClass.simpleName}")
-        retryLater(null)
+        retryLater()
         null
     }
 
     private fun classifyFailure(error: KiroraApiError, body: JsonObject?, keys: Set<String>, user: SignedInUser, sentWith: String): Outcome {
         val described = "HTTP ${error.status}${error.code?.let { " $it" } ?: ""}"
         if (error.retryable) {
-            retryLater(error)
+            retryLater(error.retryAfterMs ?: 0L)
             return Outcome.Stop
         }
         if (error.status == 401) {
@@ -295,7 +298,8 @@ internal class KiroraBatchManager(
             // after a backoff, asking for a fresh token then. Without, paused until identify()
             // gives a new token: the refused one would only be refused again.
             refusedToken = sentWith
-            if (identity.canRefresh) retryLater(null) else stopTimer()
+            identity.refused(user, sentWith)
+            if (identity.canRefresh) retryLater() else stopTimer()
             return Outcome.Stop
         }
         if (error.status == 403 && error.code == PLAN_FEATURE_UNAVAILABLE) return drop(keys, described)
@@ -306,7 +310,7 @@ internal class KiroraBatchManager(
         // Never a refusal of these events: /events/batch answers none of these for a whole
         // request, so it is a wrong apiUrl, a captive portal, a proxy, or a header Kirora refused.
         KiroraLogger.e("Events not sent, kept for a retry: Kirora's address answered $described. Check apiUrl.")
-        retryLater(error)
+        retryLater(error.retryAfterMs ?: 0L)
         return Outcome.Stop
     }
 
@@ -355,8 +359,7 @@ internal class KiroraBatchManager(
     }
 
     /** Backs off, doubling up to 5 minutes, and never sooner than `Retry-After`. */
-    private fun retryLater(error: KiroraApiError?) {
-        val retryAfterMs = error?.retryAfterMs ?: 0L
+    private fun retryLater(retryAfterMs: Long = 0L) {
         // Jitter only ever adds to the server's wait; RetryAfter caps it well below overflow.
         val delayMs = max(jittered(retryDelayMs), (retryAfterMs * (1 + Random.nextDouble() * JITTER)).toLong())
         notBefore = clock() + delayMs
@@ -428,15 +431,18 @@ internal class KiroraBatchManager(
 
         /**
          * Whether a whole-request 400 or 422 may be caused by one of the events, so splitting can
-         * isolate it: only when Kirora's `error.errors` lists a problem in the body (`in: body`).
-         * Anything else is a problem with the request, kept and retried (sdk-interface.md): no
-         * list (a proxy's or captive portal's page, say), or problems only in the headers, query
-         * or path, such as a refused `Kirora-SDK` header.
+         * isolate it: only when Kirora's `error.errors` names an event (`in: body` with `field`
+         * `events` or `events.N…`). Anything else is a problem with the request, kept and retried
+         * (sdk-interface.md): no list (a proxy's or captive portal's page, say), a problem with the
+         * envelope (a `sentAt` refused for a wrong device clock), or one in the headers, query or
+         * path, such as a refused `Kirora-SDK` header.
          */
         internal fun aboutTheEvents(body: JsonObject?): Boolean {
             val errors = (body?.get("error") as? JsonObject)?.get("errors") as? JsonArray ?: return false
             return errors.any { entry ->
-                (entry as? JsonObject)?.stringField("in") == "body"
+                val problem = entry as? JsonObject ?: return@any false
+                val field = problem.stringField("field") ?: return@any false
+                problem.stringField("in") == "body" && (field == "events" || field.startsWith("events."))
             }
         }
 

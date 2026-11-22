@@ -10,6 +10,8 @@ import com.google.firebase.messaging.RemoteMessage
  */
 internal class KiroraFirebaseService : FirebaseMessagingService() {
 
+    // Deprecated from Firebase Messaging 25.1, with the token itself: see FcmPushBridge.fetchToken.
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
     override fun onNewToken(token: String) {
         super.onNewToken(token)
         KiroraPush.onNewToken(applicationContext, token)

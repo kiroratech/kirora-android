@@ -5,9 +5,25 @@ Use the core library for events, screen views and sessions; add the FCM library 
 your app needs push notifications.
 
 **Preview — source version 0.1.0, Android 7.0 / API 24 and later.** Your app must compile
-against API 35 or later (`compileSdk = 35`), which the SDK's AndroidX dependencies require. Still open before
+against API 35 or later (`compileSdk = 35`), which the SDK's AndroidX dependencies require, and use Kotlin 2.1
+or later (the SDK is built with Kotlin 2.2). Still open before
 release: public Maven publication and real-device FCM checks. This guide documents the implemented
 API; it does not certify public Maven availability.
+
+### Words this guide uses
+
+| Term | Meaning |
+| --- | --- |
+| **User** | The person signed in to your app. The SDK knows them by the `sub` of the token your server signs. |
+| **Contact** | That person in Kirora, the profile your segments, journeys and campaigns reach. `sub` is the contact's `externalId`; a user who isn't a contact yet is created, with only `externalId`, on their first call. |
+| **Event** | Something the user did, with a name (`Order Completed`) and `properties`. The SDK adds a `context` (device, app, visit). |
+| **Visit** | Activity with no gap of 30 minutes or more; the SDK calls it a session (`sessionId`, `Session Started`). |
+| **Client key** | Your workspace's key for apps (`kirora_pk_…`). It's safe to ship in an app, and works only together with a user token your server signed. |
+| **Tracking consent** | Whether this device may collect behavioural events. Set locally, with `setTrackingConsent`. |
+| **Push consent** | The contact's agreement to **marketing** push, saved by Kirora, with `setPushConsent`. Different from Android's notification permission. |
+
+Version 1 tracks **signed-in users only**. There are no anonymous profiles: anything tracked
+before `identify()` waits on the device and goes to the next user who signs in.
 
 ## Choose the library
 
@@ -72,9 +88,10 @@ class App : Application() {
 <application android:name=".App" ... />
 ```
 
-Use your workspace's **public client key**. Token secrets and server API keys belong
-on your server. Never bundle them in resources, BuildConfig, Firebase configuration or
-the application package.
+Use your workspace's **client key** (`kirora_pk_…`). The token secret and integration keys
+belong on your server: never bundle them in resources, BuildConfig, Firebase configuration
+or the application package. A secret key (`kirora_sk_…`) passed as `clientKey` is refused:
+the client logs an error and does nothing.
 
 `Kirora.active` points to the most recently created client. Creating another destroys
 the previous client's timers and work. A replacement for the same client key and API URL
@@ -99,8 +116,10 @@ The token secret is created in your Kirora workspace and used only on your serve
 The backend verifies the token; client-side claim parsing is not authentication.
 
 After your application authenticates its user, call `identify(token)` from your app's
-coroutine scope. Call it again on authenticated application startup because the SDK
-keeps the user token in memory rather than restoring it from storage.
+coroutine scope. Call it again at every launch while your app is signed in, because the
+SDK keeps the user token in memory rather than restoring it from storage. Until then,
+events wait unbound; if the app signs out first, `logout()` drops those that continued
+the signed-in user's visit rather than let the next user to sign in adopt them.
 
 ```kotlin
 // Inside a coroutine; signedUserToken came from your authenticated server.
@@ -131,21 +150,31 @@ the current one expires, and when the app returns to the foreground.
 keep the user authenticated in the background: `AuthFailureReason.FETCH_FAILED` (your
 callback threw or timed out) or `REFUSED` (Kirora answered 401 to a fresh token, or there
 was none to try). It's called once per failure, never for one `identify()` already throws,
-and not while the user signs out. Events stay queued; call `identify()` again.
+and not while the user signs out. Events stay queued; call `identify()` again. Without
+`fetchUserToken`, sending (events and app-open reports) pauses after a refused token
+until `identify()` gives a new one.
 
 Events captured before identify remain unbound on the device and are adopted by the
 next user who signs in. Nothing is sent anonymously. A direct switch from A to B keeps
 A's previously owned events associated with A, rather than relabeling them as B.
 
-On application sign-out, call `logout()` from a coroutine. It signs the user out locally
+On application sign-out, and only then, call `logout()` from a coroutine. It signs the user out locally
 at once: anything tracked from then on waits, unbound, for the next user to sign in. It
 then attempts the outgoing user's event delivery and device detachment within a shared
-five-second deadline, with that user's own token, and drops what was left unsent.
+five-second deadline, with that user's own token, and drops what was left unsent, along
+with any events still waiting from before sign-in. With nobody signed in, it drops only
+the waiting events that continued a signed-in user's visit: a visitor who never signed
+in keeps theirs, and with `trackSessions` off nothing tells them apart, so none are
+dropped. Also with nobody signed in (after a
+relaunch, before `identify()`), it still detaches the device's last registration, by the
+device secret Kirora answered that registration with.
 
 The detachment waits for a push registration already under way (an FCM token refresh,
-say), so it detaches the registration that leaves, not an older one. Failed device
-detachment may retry in memory for up to 24 hours, stopping on success, a terminal
-refusal or client destruction. Process death ends that cleanup; offline logout cannot
+say), so it detaches the registration that leaves, not an older one. A failed
+detachment is retried in the background for up to 24 hours from the sign-out, stopping
+on success or a terminal refusal; if the user's token is refused meanwhile, it goes on
+with the device secret. The device secret is kept on the device with the registration, so
+a detachment the process didn't finish resumes at the next launch. Offline logout cannot
 guarantee immediate server-side push revocation.
 
 ## Track activity
@@ -153,19 +182,59 @@ guarantee immediate server-side push revocation.
 ```kotlin
 kirora.track(
     "Order Completed",
-    mapOf("order_id" to "ORD-1042", "amount" to 12500, "currency" to "NGN")
+    mapOf("order_id" to "ORD-1042", "total" to 125.00, "currency" to "NGN")
 )
 kirora.trackScreenView("Checkout")
 ```
 
-Use clear past-tense event names and consistent property names. The server validates
-names, reserved names and property limits. Properties are copied when `track` is called.
+Name events as Kirora's event guide does:
+
+- **Event names** are Title Case, object then past-tense action (`Plan Upgraded`,
+  `Payment Failed`), one fixed name per action, up to 128 characters. Names are
+  case-sensitive: a journey waiting for `Order Completed` ignores `order completed`.
+- **Property names** are lowercase snake_case (`order_id`, `plan_name`), up to 64
+  characters, with the whole `properties` object at most 16 KB as JSON. Send the same type
+  every time, and amounts in major units (`125.00`, not `12500`).
+- **Key events** have standard names Kirora's goals and journey templates are built on:
+  `Order Completed` (its value read from `total` by default), `Signed Up`, `Checkout Started`,
+  `Payment Failed`, `Payment Succeeded`, `Subscription Started` and others. Use them where
+  they fit.
+
+The server validates names, reserved names and property limits. Properties are copied
+when `track` is called.
 Supported values are JSON-compatible maps with string keys, lists/arrays, strings,
 finite numbers, booleans and null; dates are converted to ISO 8601 strings and enums to
 their names. Cycles, non-finite numbers and unsupported objects drop that event.
 
-Sessions are enabled by default (`trackSessions = true`). Lifecycle events are optional
-(`trackAppLifecycle = false` by default). Both follow tracking consent.
+The SDK tracks these itself, all following tracking consent:
+
+| Event | When | Properties |
+| --- | --- | --- |
+| `Session Started` | A visit begins: the first activity, or the first after 30 minutes without any. Time in the foreground never ends a visit. On by default (`trackSessions = true`) | None |
+| `Screen Viewed` | Only when you call `trackScreenView(name)`; screens are never tracked automatically | `name` |
+| `Application Installed` | The first launch after install, with `trackAppLifecycle = true` (off by default) | `version`, `build` |
+| `Application Updated` | The first launch of a new version | `version`, `build`, `previous_version`, `previous_build` |
+| `Application Opened` | Each launch and each return to the foreground | `from_background`, `version`, `build` |
+| `Application Backgrounded` | The app leaves the foreground | None |
+
+A visit continues across an app restart within 30 minutes, and ends at sign-out or when
+another user signs in. Recreating the client (a hot reload, say) doesn't count as another
+launch.
+
+### Use events in Kirora
+
+Events reach the contact your token names, and Kirora reads them by name and property:
+
+- **Segments** select contacts by what they did, such as "`Order Completed` at least twice
+  in 90 days" or "`Payment Failed` in the last 7 days".
+- **Journeys** start when an event arrives (`Signed Up` starts an onboarding journey) and
+  can branch or end on later ones (`Payment Succeeded` ends the failed-payment reminders).
+- **Goals** count conversions from key events, such as revenue from `Order Completed`.
+- **Campaigns** send once to an audience: all contacts, lists, a segment or rules. Marketing push goes only to contacts with
+  push consent and a device that allows notifications.
+
+These are set up in Kirora, not in the app. The SDK's part is to send consistent names and
+properties for the signed-in user, and to register their device for push.
 
 The SDK is designed to send after 20 queued events, within 30 seconds otherwise, and
 when the app backgrounds. Batches have limits of 100 events and 200,000 bytes. `flush()`
@@ -273,6 +342,8 @@ kirora.requestPushPermission(activity) { permission ->
 
 The suspend alternative returns the same `PushPermission`. `getPushStatus()` reads
 `ENABLED`, `DISABLED`, `DENIED`, `UNANSWERED` or `UNSUPPORTED` without prompting.
+`DENIED` also covers Kirora's notification channel turned off in the system settings,
+since nothing on it is shown and only the settings can change that; send the user there.
 `setPushEnabled(false)` detaches this installation; `true` registers again when permission
 allows it. A granted permission request also turns the device preference back on.
 
@@ -321,7 +392,9 @@ Delivery still depends on FCM, system settings and Android background restrictio
 `defaultChannelName`. The default channel is `kirora_default`. Create any custom channels
 in your app; channel sound/importance are controlled by Android settings. The renderer
 supports an optional HTTPS image, up to two HTTPS action buttons and notification
-replacement by `tag`. Image loading is best effort.
+replacement by `tag`. Image loading is best effort. A push for a channel the user turned
+off in system settings (or, from Android 9, its channel group) is not shown, and isn't
+reported as delivered.
 
 Foreground messages display by default. `onForegroundNotification` can return false to
 suppress display. `addForegroundNotificationListener` receives arriving Kirora messages;
@@ -422,7 +495,14 @@ properties are configured. Local staging is not a public release.
 Run the unit tests (Robolectric) with:
 
 ```sh
-./gradlew :kirora-sdk:testDebugUnitTest
+./gradlew :kirora-sdk:testDebugUnitTest :kirora-sdk-push:testDebugUnitTest
+```
+
+The device checks (notifications as Android draws them, real redirects, taps) run on a
+connected emulator or device:
+
+```sh
+./gradlew :kirora-sdk:connectedDebugAndroidTest
 ```
 
 Physical-device FCM checks (foreground, background, terminated launch, permission changes) are

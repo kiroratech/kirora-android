@@ -171,7 +171,7 @@ internal class DeliveryConformanceTest : KiroraTestBase() {
 
     @Test
     fun theQueueKeepsItsCountAndByteBudgets() = runBlocking {
-        val store = EventStore(null) // the in-memory fallback has the same budgets
+        val store = EventStore({ null }) // the in-memory fallback has the same budgets
         fun event(size: Int) = EventEntity(
             idempotencyKey = UUID.randomUUID().toString(), name = "e", propertiesJson = "{}", contextJson = "{}",
             occurredAt = 0, owner = "u", sizeBytes = size

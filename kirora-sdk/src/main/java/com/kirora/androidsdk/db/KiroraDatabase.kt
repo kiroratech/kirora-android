@@ -12,7 +12,7 @@ import java.io.File
  */
 @Database(
     entities = [EventEntity::class, AppOpenEntity::class],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 internal abstract class KiroraDatabase : RoomDatabase() {
@@ -25,22 +25,12 @@ internal abstract class KiroraDatabase : RoomDatabase() {
         fun getInstance(context: Context, namespace: String): KiroraDatabase = synchronized(instances) {
             instances.getOrPut(namespace) {
                 val app = context.applicationContext
-                deleteLegacyDatabase(app)
                 Room.databaseBuilder(
                     app,
                     KiroraDatabase::class.java,
                     // Kept out of auto-backup so a restore never replays another device's events.
                     File(app.noBackupFilesDir, "kirora_$namespace.db").absolutePath
                 ).fallbackToDestructiveMigration(true).build()
-            }
-        }
-
-        /** Before 0.1.0 the queue was one file for every workspace, with no owner it could trust. */
-        private fun deleteLegacyDatabase(context: Context) {
-            try {
-                val legacy = File(context.noBackupFilesDir, "kirora_events.db")
-                if (legacy.exists()) context.deleteDatabase(legacy.absolutePath)
-            } catch (_: Throwable) {
             }
         }
 

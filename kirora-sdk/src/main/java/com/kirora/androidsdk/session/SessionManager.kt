@@ -3,6 +3,7 @@ package com.kirora.androidsdk.session
 import android.os.Handler
 import android.os.Looper
 import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.kirora.androidsdk.utils.KiroraLogger
@@ -29,7 +30,8 @@ internal class SessionManager(
     /** The app opened or came back to the foreground. Not an event; see `KiroraAppOpenReporter`. */
     private val onAppOpen: () -> Unit = {},
     private val isTrackingAllowed: () -> Boolean = { true },
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val processLifecycle: () -> Lifecycle = { ProcessLifecycleOwner.get().lifecycle }
 ) : DefaultLifecycleObserver {
 
     @Volatile
@@ -40,16 +42,44 @@ internal class SessionManager(
 
     @Volatile
     private var foreground = false
-    private var startedBefore = false
+    /** The start the lifecycle replays to a new observer was already counted by the client this one replaced. */
+    private var skipReplayedStart = false
     private var lastActivity = 0L
     private var lastPersisted = 0L
 
     @Volatile
     private var stopped = false
 
+    /** Whether the stored visit and app version have been read: once, by the startup work or the first activity. */
+    @Volatile
+    private var begun = false
+
+    /**
+     * Reads the stored visit (continuing it or starting one) and the app version, once. Done off
+     * the main thread at start; anything needing the visit before that does it first, and waits.
+     */
+    fun ensureBegun() {
+        if (begun) return
+        synchronized(this) {
+            if (begun) return
+            begun = true
+            beginTracking()
+        }
+    }
+
+    /** Watches the app's lifecycle; the stored visit is read by [ensureBegun]. */
     fun start() {
-        beginTracking()
-        runOnMain { ProcessLifecycleOwner.get().lifecycle.addObserver(this) }
+        runOnMain {
+            val lifecycle = processLifecycle()
+            if (watching !== lifecycle) {
+                watching = lifecycle
+                lifecycle.addObserver(processWatcher)
+            }
+            // addObserver replays a start already under way at once, on this thread.
+            skipReplayedStart = foregroundCounted
+            lifecycle.addObserver(this)
+            skipReplayedStart = false
+        }
     }
 
     private fun beginTracking() {
@@ -66,12 +96,13 @@ internal class SessionManager(
 
     fun stop() {
         stopped = true
-        runOnMain { ProcessLifecycleOwner.get().lifecycle.removeObserver(this) }
+        runOnMain { processLifecycle().removeObserver(this) }
     }
 
     /** Called for every tracked event, before it is captured. */
     @Synchronized
     fun onActivity() {
+        ensureBegun()
         if (!trackSessions || !isTrackingAllowed()) return
         val now = clock()
         val current = owner()
@@ -178,21 +209,37 @@ internal class SessionManager(
 
     override fun onStart(owner: LifecycleOwner) {
         if (stopped) return
-        foreground = true
-        // The first start of this process is a cold launch; any later one is a return from the background.
-        val fromBackground = startedBefore
-        startedBefore = true
-        onForeground()
-        if (!isTrackingAllowed()) return
-        onAppOpen()
-        // Returning to the foreground is activity: it keeps the visit or begins one.
-        onActivity()
-        if (trackAppLifecycle) {
+        val fromBackground = try {
+            countStart()
+        } finally {
+            foreground = true
+        }
+        if (fromBackground != null && trackAppLifecycle) {
             trackEvent(
                 "Application Opened",
                 mapOf("from_background" to fromBackground, "version" to appVersion, "build" to appBuild)
             )
         }
+    }
+
+    /**
+     * Counts a start as an app open and activity, answering whether it was a return from the
+     * background; null for one not to report. Runs while the app still counts as in the
+     * background, so a visit that ran out while the app was away ends.
+     */
+    private fun countStart(): Boolean? {
+        // A replacement client (a hot reload, say): the same launch, not another open.
+        if (skipReplayedStart) return null
+        foregroundCounted = true
+        // The first start of this process is a cold launch; any later one is a return from the background.
+        val fromBackground = processStarted
+        processStarted = true
+        onForeground()
+        if (!isTrackingAllowed()) return null
+        onAppOpen()
+        // Returning to the foreground is activity: it keeps the visit or begins one.
+        onActivity()
+        return fromBackground
     }
 
     override fun onStop(owner: LifecycleOwner) {
@@ -210,6 +257,25 @@ internal class SessionManager(
     }
 
     companion object {
+        // Shared by every client in the process, so a replacement doesn't count a launch or a
+        // return again, and knows a later start is a return from the background. Main thread only.
+        private var processStarted = false
+        private var foregroundCounted = false
+        /** The lifecycle [processWatcher] watches: the process's, once. */
+        private var watching: Lifecycle? = null
+
+        /** Ends the counted foreground even while no client is listening (between a destroy() and the next client). */
+        private val processWatcher = object : DefaultLifecycleObserver {
+            override fun onStop(owner: LifecycleOwner) {
+                foregroundCounted = false
+            }
+        }
+
+        internal fun resetForTesting() {
+            processStarted = false
+            foregroundCounted = false
+        }
+
         const val SESSION_TIMEOUT_MS = 30 * 60 * 1000L
         private const val PERSIST_INTERVAL_MS = 5_000L
     }

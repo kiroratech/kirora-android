@@ -9,6 +9,10 @@ import kotlin.coroutines.resume
 /** Found by name from the core SDK when `push = true`. */
 internal class FcmPushBridge : KiroraPushBridge {
 
+    // Deprecated from Firebase Messaging 25.1 in favour of registering by Firebase installation ID.
+    // Kirora registers devices by FCM token (`targetKind` fcm_token), so this stays until the
+    // registration contract moves, for every SDK at once.
+    @Suppress("DEPRECATION")
     override suspend fun fetchToken(): String? = suspendCancellableCoroutine { cont ->
         FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
             if (cont.isActive) cont.resume(if (task.isSuccessful) task.result else null)

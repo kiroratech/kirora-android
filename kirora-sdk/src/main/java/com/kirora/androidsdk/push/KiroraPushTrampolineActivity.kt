@@ -119,7 +119,7 @@ internal class KiroraPushTrampolineActivity : Activity() {
         ) {
             // A wrapper installed push at launch but hasn't set its deep-link handler yet: open the
             // app so its code runs, and hand the link over once it does (or after 10 seconds).
-            launchApp(this)
+            bringAppForward(this)
             Kirora.openWhenWrapperReady(applicationContext, actionUrl)
             return
         }
@@ -141,7 +141,7 @@ internal class KiroraPushTrampolineActivity : Activity() {
                 when {
                     // The app routed it, perhaps with no screen showing: bring it forward.
                     handled -> bringAppForward(this)
-                    !openAction(this, actionUrl) -> launchApp(this)
+                    !openAction(this, actionUrl) -> bringAppForward(this)
                 }
                 return
             }
@@ -204,9 +204,15 @@ internal class KiroraPushTrampolineActivity : Activity() {
             return false
         }
 
-        /** Brings the app's task to the front as the launcher would, without resetting its screens. */
+        /**
+         * Opens the app, or brings its task to the front as the launcher would, without closing the
+         * screens the user left open.
+         */
         internal fun bringAppForward(context: Context) {
-            val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return
+            val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: run {
+                KiroraLogger.w("No launch intent found for package: ${context.packageName}")
+                return
+            }
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
             try {
                 context.startActivity(launchIntent)
@@ -218,17 +224,7 @@ internal class KiroraPushTrampolineActivity : Activity() {
         /** Opens [actionUrl] (through `handleDeepLink`, never asking a wrapper) or else the app, at once. */
         internal fun openNow(context: Context, actionUrl: String?) {
             if (actionUrl != null && openAction(context, actionUrl)) return
-            launchApp(context)
-        }
-
-        internal fun launchApp(context: Context) {
-            val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                context.startActivity(launchIntent)
-            } else {
-                KiroraLogger.w("No launch intent found for package: ${context.packageName}")
-            }
+            bringAppForward(context)
         }
     }
 }

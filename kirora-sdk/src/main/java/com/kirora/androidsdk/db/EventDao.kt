@@ -17,17 +17,35 @@ internal interface EventDao : PurgeTarget {
     @Query("SELECT * FROM events WHERE owner = :owner ORDER BY seq ASC LIMIT :limit")
     suspend fun oldestFor(owner: String, limit: Int): List<EventEntity>
 
+    @Query("SELECT * FROM events WHERE owner IS NULL")
+    suspend fun unowned(): List<EventEntity>
+
     @Query("SELECT idempotencyKey FROM events WHERE owner IS NULL")
     suspend fun unownedKeys(): List<String>
+
+    /** Those waiting from before sign-in that continued a visit other than [owner]'s. */
+    @Query("SELECT * FROM events WHERE owner IS NULL AND visitOwner IS NOT NULL AND visitOwner != :owner")
+    suspend fun unownedOnOtherVisits(owner: String): List<EventEntity>
+
+    @Query("UPDATE events SET contextJson = :contextJson WHERE seq = :seq")
+    suspend fun setContext(seq: Long, contextJson: String)
 
     @Query("UPDATE events SET owner = :owner WHERE owner IS NULL")
     suspend fun adoptUnowned(owner: String)
 
-    /** Binds every unowned event to [owner] in one transaction; returns their keys. */
+    /**
+     * Binds every unowned event to [owner] in one transaction, as [adoptedBy] does: only those from
+     * another user's visit are rewritten (without their `sessionId`). Returns their keys.
+     */
     @Transaction
     suspend fun adopt(owner: String): List<String> {
         val keys = unownedKeys()
-        if (keys.isNotEmpty()) adoptUnowned(owner)
+        if (keys.isEmpty()) return keys
+        unownedOnOtherVisits(owner).forEach { event ->
+            val adopted = event.adoptedBy(owner)
+            if (adopted.contextJson != event.contextJson) setContext(event.seq, adopted.contextJson)
+        }
+        adoptUnowned(owner)
         return keys
     }
 
@@ -40,6 +58,12 @@ internal interface EventDao : PurgeTarget {
     @Query("DELETE FROM events WHERE owner = :owner")
     suspend fun deleteOwnedBy(owner: String): Int
 
+    @Query("DELETE FROM events WHERE owner IS NULL")
+    suspend fun deleteUnowned(): Int
+
+    @Query("DELETE FROM events WHERE owner IS NULL AND visitOwner IS NOT NULL")
+    suspend fun deleteUnownedOnSignedInVisits(): Int
+
     /** Events of earlier sign-ins whose tokens named nobody: nobody can sign in as them again. */
     @Query("DELETE FROM events WHERE owner LIKE 'kirora:unnamed:%' AND owner != :current")
     suspend fun deleteUnnamedExcept(current: String): Int
@@ -49,7 +73,11 @@ internal interface EventDao : PurgeTarget {
 
     override suspend fun purgeAll() = clearAll()
 
-    override suspend fun purgeOwner(owner: String) = deleteOwnedBy(owner)
+    override suspend fun purgeOwner(owner: String) = when (owner) {
+        PurgeTarget.UNOWNED -> deleteUnowned()
+        PurgeTarget.UNOWNED_ON_SIGNED_IN_VISITS -> deleteUnownedOnSignedInVisits()
+        else -> deleteOwnedBy(owner)
+    }
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(events: List<EventEntity>)

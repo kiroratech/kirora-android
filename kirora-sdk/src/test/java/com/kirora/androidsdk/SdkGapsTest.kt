@@ -115,6 +115,10 @@ internal class SdkGapsTest : KiroraTestBase() {
         assertFalse("no list: a request problem", about("""{"error":{"code":"VALIDATION_ERROR","message":"Text must not contain the NUL character"}}"""))
         assertTrue(about("""{"error":{"code":"VALIDATION_ERROR","message":"x","errors":[{"in":"body","field":"events.3.properties.note","code":"custom"}]}}"""))
         assertTrue(about("""{"error":{"code":"VALIDATION_ERROR","message":"x","errors":[{"in":"body","field":"events.0.name"}]}}"""))
+        assertFalse("the envelope, not an event: splitting can't help", about("""{"error":{"code":"VALIDATION_ERROR","message":"x","errors":[{"in":"body","field":"sentAt"}]}}"""))
+        assertFalse("no field", about("""{"error":{"code":"VALIDATION_ERROR","message":"x","errors":[{"in":"body"}]}}"""))
+        assertFalse("not the events list", about("""{"error":{"code":"VALIDATION_ERROR","message":"x","errors":[{"in":"body","field":"eventsCount"}]}}"""))
+        assertTrue(about("""{"error":{"code":"VALIDATION_ERROR","message":"x","errors":[{"in":"body","field":"events"}]}}"""))
         assertFalse("where unknown", about("""{"error":{"code":"VALIDATION_ERROR","message":"x","errors":[{"field":"sentAt"}]}}"""))
         assertFalse(about("""{"error":{"code":"VALIDATION_ERROR","message":"x","errors":[{"in":"query","field":"x"}]}}"""))
         assertFalse(about("""{"error":{"code":"VALIDATION_ERROR","message":"Kirora-SDK header required: <sdk>/<version>"}}"""))
@@ -209,5 +213,23 @@ internal class SdkGapsTest : KiroraTestBase() {
         assertEquals("de-DE", tag("de-DE-1996-x-private"))
         assertEquals("fr", tag("fr"))
         assertNull(tag("und"))
+    }
+
+    @Test
+    fun anEventTrackedJustBeforeDestroyGoesWithTheNextClientsFirstSignIn() = runBlocking {
+        val first = start()
+        val release = java.util.concurrent.CountDownLatch(1)
+        // The queue is busy, so this event's write hasn't run when the client is destroyed.
+        Kirora.holdQueueForTesting(release)
+        first.track("Before sign-in")
+        first.destroy()
+        release.countDown()
+
+        val second = start(clearQueue = false)
+        second.identify(jwt("user-a"))
+        second.flush()
+        waitUntil(message = "the event sent") {
+            fake.sentEventNames.contains("Before sign-in")
+        }
     }
 }

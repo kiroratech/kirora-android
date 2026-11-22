@@ -35,11 +35,14 @@ internal abstract class KiroraTestBase {
     }
 
     /** A client on a fresh queue, talking to [fake]. */
-    protected fun start(options: KiroraOptions = KiroraOptions(trackSessions = false), clearQueue: Boolean = true): Kirora {
+    protected fun start(
+        options: KiroraOptions = KiroraOptions(trackSessions = false),
+        clearQueue: Boolean = true,
+        clock: () -> Long = System::currentTimeMillis
+    ): Kirora {
         // A restart reads what the previous client saved.
         runBlocking { Kirora.awaitConsentSavedForTesting() }
-        val kirora = Kirora(context, options.withClientKey("kirora_pk_test"), KiroraEnvironment(pushBridge = bridge))
-        kirora.setApiServiceForTesting(fake)
+        val kirora = Kirora(context, options.withClientKey("kirora_pk_test"), KiroraEnvironment(clock = clock, pushBridge = bridge, apiService = fake))
         runBlocking {
             kirora.awaitReady()
             if (clearQueue) {
@@ -57,4 +60,19 @@ internal abstract class KiroraTestBase {
     protected suspend fun Kirora.queued(): Int = databaseForTesting!!.eventDao().getCount()
 
     protected suspend fun Kirora.waitQueued(n: Int) = waitUntil(message = "$n queued events") { queued() == n }
+
+    /** Names of the events waiting from before sign-in. */
+    protected suspend fun Kirora.waiting(): List<String> = databaseForTesting!!.eventDao().unowned().map { it.name }
+
+    protected suspend fun Kirora.waitWaiting(name: String) = waitUntil(message = "$name waiting") { name in waiting() }
+
+    /** user-a's visit (signed in, one event sent), then a relaunch: nobody signed in yet. */
+    protected suspend fun relaunchedAfterAVisit(options: KiroraOptions): Kirora {
+        val first = start(options)
+        first.identify(jwt("user-a"))
+        first.track("A1") // the visit is A's from their first event signed in
+        first.flush()
+        first.destroy()
+        return start(options, clearQueue = false)
+    }
 }

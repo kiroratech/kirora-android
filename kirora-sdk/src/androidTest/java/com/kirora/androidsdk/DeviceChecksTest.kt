@@ -2,11 +2,13 @@ package com.kirora.androidsdk
 
 import android.Manifest
 import android.app.Activity
+import android.app.Application
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Bundle
 import androidx.core.app.NotificationCompat
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -16,6 +18,7 @@ import com.kirora.androidsdk.model.KiroraPushOptions
 import com.kirora.androidsdk.push.KiroraPushDisplay
 import com.kirora.androidsdk.push.KiroraPushTrampolineActivity
 import com.kirora.androidsdk.push.PushDisplayConfig
+import com.kirora.androidsdk.utils.GlobalPreferences
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -159,6 +162,15 @@ class DeviceChecksTest {
         }
     }
 
+    @Test
+    fun theSavedIconIsFoundByNameSoAnotherBuildsNumberingDoesntMatter() {
+        val prefs = GlobalPreferences(context)
+        val icon = context.resources.getIdentifier("kirora_test_icon", "drawable", context.packageName)
+        assertTrue(icon != 0)
+        prefs.savePushDisplay(icon, null, "c", "C")
+        assertEquals(icon, prefs.getPushDisplay().smallIconResId)
+    }
+
     /** Each link a tap opened, with when (ms since the tap screen was created, [tapAt]). */
     private val routed = Collections.synchronizedList(mutableListOf<Pair<String, Long>>())
     @Volatile private var tapAt = 0L
@@ -188,16 +200,29 @@ class DeviceChecksTest {
     /** Taps: starts the tap screen as the notification would, and returns it once created. */
     private fun tap(intent: Intent): Activity {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = context as Application
+        // The wait starts when the screen is created, so the clock does too: a loaded emulator can
+        // take seconds to get there, and the monitor below answers some time after.
+        val created = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                if (activity is KiroraPushTrampolineActivity) tapAt = System.currentTimeMillis()
+            }
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        }
+        app.registerActivityLifecycleCallbacks(created)
         val monitor = instrumentation.addMonitor(KiroraPushTrampolineActivity::class.java.name, null, false)
-        val screen = try {
+        return try {
             context.startActivity(intent)
             instrumentation.waitForMonitorWithTimeout(monitor, 20_000)
         } finally {
             instrumentation.removeMonitor(monitor)
+            app.unregisterActivityLifecycleCallbacks(created)
         } ?: throw AssertionError("the tap screen did not start")
-        // The wait starts when the screen is created; a loaded emulator can take seconds to get there.
-        tapAt = System.currentTimeMillis()
-        return screen
     }
 
     private fun awaitRouted(timeoutMs: Long) {
@@ -240,5 +265,39 @@ class DeviceChecksTest {
         // more (its read timeout). The upper bound leaves room for a debug build on a loaded
         // emulator, where verifying each method the first time it runs can take a second.
         assertTrue("opened after $at ms", at in Kirora.TAP_REPORT_WAIT_MS - 200..10_000)
+    }
+
+    @Test
+    fun creatingTheClientReadsNothingFromDiskOnTheMainThread() {
+        assumeTrue("StrictMode's listener needs Android 9", Build.VERSION.SDK_INT >= 28)
+        // A client of a fresh workspace each run, so nothing is already loaded in memory.
+        val key = "kirora_pk_strict_${System.nanoTime()}"
+        val violations = Collections.synchronizedList(mutableListOf<String>())
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        var before: android.os.StrictMode.ThreadPolicy? = null
+        instrumentation.runOnMainSync {
+            before = android.os.StrictMode.getThreadPolicy()
+            android.os.StrictMode.setThreadPolicy(
+                android.os.StrictMode.ThreadPolicy.Builder()
+                    .detectDiskReads()
+                    .detectDiskWrites()
+                    .penaltyListener({ it.run() }) { v ->
+                        val trace = v.stackTrace.joinToString("\n") { it.toString() }
+                        if ("com.kirora.androidsdk" in trace) violations.add(trace)
+                    }
+                    .build()
+            )
+            Kirora(context, KiroraOptions(clientKey = key, trackSessions = true, push = KiroraPushOptions()))
+        }
+        try {
+            // StrictMode reports a main-thread violation once the looper is idle, through the policy
+            // then in place: kept until it has.
+            instrumentation.waitForIdleSync()
+            Thread.sleep(1_000)
+            instrumentation.waitForIdleSync()
+        } finally {
+            instrumentation.runOnMainSync { android.os.StrictMode.setThreadPolicy(before) }
+        }
+        assertEquals("disk access on the main thread:\n" + violations.joinToString("\n----\n"), 0, violations.size)
     }
 }

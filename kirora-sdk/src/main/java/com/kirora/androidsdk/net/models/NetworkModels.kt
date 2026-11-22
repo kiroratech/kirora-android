@@ -31,7 +31,9 @@ internal data class DeviceRegistrationRequest(
     @SerializedName("appVersion") val appVersion: String? = null,
     @SerializedName("osVersion") val osVersion: String? = null,
     @SerializedName("locale") val locale: String? = null,
-    @SerializedName("timezone") val timezone: String? = null
+    @SerializedName("timezone") val timezone: String? = null,
+    /** The installation's own secret, made once on the device: detaches it with no user token. */
+    @SerializedName("deviceSecret") val deviceSecret: String? = null
 )
 
 /** `POST /client/v1/devices/{externalInstallationId}/app-opens`; answered with 204. */

@@ -33,7 +33,8 @@ import kotlin.math.min
  * (never sooner than `Retry-After`) and dropped unsent after 7 days.
  */
 internal class KiroraAppOpenReporter(
-    private val dao: AppOpenDao?,
+    /** Asked for on first use: opening the database touches the disk. */
+    daoProvider: () -> AppOpenDao?,
     private val preferences: KiroraPreferences,
     private val apiService: () -> KiroraApiService?,
     private val scope: CoroutineScope,
@@ -52,12 +53,19 @@ internal class KiroraAppOpenReporter(
     private val purges: PendingPurges = PendingPurges(),
     private val clock: () -> Long = System::currentTimeMillis
 ) {
-    /** The last open recorded; written through to storage only when [persistSpacing]. */
-    @Volatile
-    private var lastOpen = if (persistSpacing) preferences.getLastAppOpen() else 0L
+    private val dao: AppOpenDao? by lazy(daoProvider)
 
-    init {
-        // Kept by an earlier start with sessions on: not needed, and not to be kept.
+    /** The last open recorded, read from storage on first need; written through only when [persistSpacing]. */
+    @Volatile
+    private var lastOpenRead: Long? = null
+    private var lastOpen: Long
+        get() = lastOpenRead ?: (if (persistSpacing) preferences.getLastAppOpen() else 0L).also { lastOpenRead = it }
+        set(value) {
+            lastOpenRead = value
+        }
+
+    /** At start, off the caller's thread: a time kept by an earlier start with sessions on is not needed, and not to be kept. */
+    fun forgetUnusedSpacing() {
         if (!persistSpacing) preferences.clearLastAppOpen()
     }
 
@@ -176,6 +184,8 @@ internal class KiroraAppOpenReporter(
         val d = dao ?: return@withLock
         val user = identity.user ?: return@withLock
         if (!trackingAllowed() || clock() < max(nextRetryAt, holdUntil)) return@withLock
+        // Kirora refused this token and nothing can replace it but identify(): waiting, not retrying.
+        if (user.waitingForToken) return@withLock
         val service = apiService() ?: return@withLock
         if (!purges.settle(d)) return@withLock
         d.deleteOlderThan(clock() - MAX_AGE_MS)
@@ -197,17 +207,24 @@ internal class KiroraAppOpenReporter(
 
     private suspend fun send(service: KiroraApiService, user: SignedInUser, deviceId: String, open: AppOpenEntity): Result {
         val body = AppOpenRequest(JsonSnapshot.formatIso8601(open.occurredAt), open.pushAppId)
-        val token = user.token
-        var response = post(service, deviceId, body, token) ?: return Result.RETRY
+        val response = try {
+            // Null while the user waits for identify() to replace a refused token: kept, not retried.
+            identity.authorized(user) { service.postAppOpen(deviceId, body, it) } ?: return Result.RETRY
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: UserTokenError) {
+            onAuthFailure(AuthFailureReason.FETCH_FAILED, user)
+            applyBackoff(null)
+            return Result.RETRY
+        } catch (e: Exception) {
+            KiroraLogger.d("App open will be retried: ${e.javaClass.simpleName}")
+            applyBackoff(null)
+            return Result.RETRY
+        }
         if (response.code() == 401) {
-            val fresh = try {
-                identity.refresh(user, token)
-            } catch (_: UserTokenError) {
-                onAuthFailure(AuthFailureReason.FETCH_FAILED, user)
-                null
-            }
-            if (fresh != null && fresh != token) response = post(service, deviceId, body, fresh) ?: return Result.RETRY
-            if (response.code() == 401) onAuthFailure(AuthFailureReason.REFUSED, user)
+            onAuthFailure(AuthFailureReason.REFUSED, user)
+            // Refused for good (no fetchUserToken): waiting for identify(), not retried on a timer.
+            if (user.waitingForToken) return Result.RETRY
         }
         val code = response.code()
         return when {
@@ -232,16 +249,6 @@ internal class KiroraAppOpenReporter(
                 Result.DROP
             }
         }
-    }
-
-    private suspend fun post(service: KiroraApiService, deviceId: String, body: AppOpenRequest, token: String): Response<Unit>? = try {
-        service.postAppOpen(deviceId, body, "Bearer $token")
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        KiroraLogger.d("App open will be retried: ${e.javaClass.simpleName}")
-        applyBackoff(null)
-        null
     }
 
     private fun applyBackoff(response: Response<*>?) {
