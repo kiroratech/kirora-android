@@ -4,9 +4,9 @@ Connect signed-in users' app activity to Kirora and register their devices for p
 Use the core library for events, screen views and sessions; add the FCM library when
 your app needs push notifications.
 
-**Preview, version 0.1.0.** Android 7.0 (API 24) and later. Your app must compile against
-API 35 or later and use Kotlin 2.1 or later. The SDK is not yet published to a public Maven
-repository.
+**Version 0.1.0, on Maven Central.** Android 7.0 (API 24) and later. Your app must compile
+against API 35 or later and use Kotlin 2.1 or later. Until 1.0, a minor version may change the
+API; [CHANGELOG.md](CHANGELOG.md) says what to do on each upgrade.
 
 ### Words this guide uses
 
@@ -27,13 +27,15 @@ repository.
 | Core | `io.kirora:android-sdk:0.1.0` | Identity, events, screen views, sessions, consent and local event storage. No Firebase dependency. |
 | Core + FCM | `io.kirora:android-sdk-push:0.1.0` | Core plus Firebase Messaging, notification rendering and the FCM service. |
 
-Until the libraries are published, depend on the modules from this checkout, as the sample
-app does:
+Both are on Maven Central, which Android projects include by default (`mavenCentral()` in
+`settings.gradle.kts`):
 
 ```kotlin
 // app/build.gradle.kts: choose one. The push library includes core.
-implementation(project(":kirora-sdk"))
-implementation(project(":kirora-sdk-push"))
+dependencies {
+    implementation("io.kirora:android-sdk:0.1.0")
+    implementation("io.kirora:android-sdk-push:0.1.0")
+}
 ```
 
 The Kotlin package is `com.kirora.androidsdk`.
