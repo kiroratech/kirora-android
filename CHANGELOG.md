@@ -3,7 +3,7 @@
 All notable changes to the Kirora Android SDK are recorded here. Each entry says whether apps
 need to do anything to upgrade.
 
-## Unreleased
+## 0.1.0 (2026-11-23)
 
 ### Changed (public API, before 1.0)
 - **Maven coordinates** are `io.kirora:android-sdk` and `io.kirora:android-sdk-push` (were
