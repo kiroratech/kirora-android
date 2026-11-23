@@ -1,0 +1,43 @@
+name: Release
+
+# Runs only for a version tag pushed by hand (a bare version, e.g. 0.1.0, as iOS uses). It uploads
+# both libraries to Maven Central and validates them there; the release itself stays manual:
+# "Publish" in the Central Portal (central.sonatype.com > Deployments), since it can't be undone.
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: gradle/actions/wrapper-validation@v6
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Tag matches kiroraSdkVersion
+        run: |
+          version=$(sed -nE 's/^kiroraSdkVersion=(.*)/\1/p' gradle.properties)
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match kiroraSdkVersion=$version in gradle.properties" >&2
+            exit 1
+          fi
+      - name: Checks
+        run: ./gradlew :kirora-sdk:testDebugUnitTest :kirora-sdk-push:testDebugUnitTest :kirora-sdk:apiCheck :kirora-sdk-push:apiCheck :kirora-sdk:lintRelease :kirora-sdk-push:lintRelease
+      - name: Upload to Maven Central
+        run: ./gradlew :kirora-sdk:publishToMavenCentral :kirora-sdk-push:publishToMavenCentral --no-configuration-cache
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}

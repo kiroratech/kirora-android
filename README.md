@@ -24,8 +24,8 @@ repository.
 
 | Library | Gradle coordinate | Includes |
 | --- | --- | --- |
-| Core | `com.kirora:android-sdk:0.1.0` | Identity, events, screen views, sessions, consent and local event storage. No Firebase dependency. |
-| Core + FCM | `com.kirora:android-sdk-push:0.1.0` | Core plus Firebase Messaging, notification rendering and the FCM service. |
+| Core | `io.kirora:android-sdk:0.1.0` | Identity, events, screen views, sessions, consent and local event storage. No Firebase dependency. |
+| Core + FCM | `io.kirora:android-sdk-push:0.1.0` | Core plus Firebase Messaging, notification rendering and the FCM service. |
 
 Until the libraries are published, depend on the modules from this checkout, as the sample
 app does:

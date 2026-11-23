@@ -7,6 +7,7 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.plugin.serialization) apply false
     alias(libs.plugins.google.services) apply false
     alias(libs.plugins.binary.compatibility.validator) apply false
+    alias(libs.plugins.vanniktech.publish) apply false
 }
 
 // Each library's public API is recorded in its api/ file, and `check` fails on a change that would

@@ -6,6 +6,9 @@ need to do anything to upgrade.
 ## Unreleased
 
 ### Changed (public API, before 1.0)
+- **Maven coordinates** are `io.kirora:android-sdk` and `io.kirora:android-sdk-push` (were
+  `com.kirora:…`), the group Maven Central verifies through Kirora's domain, `kirora.io`. The
+  Kotlin package stays `com.kirora.androidsdk`. **Action:** use the new group in your dependencies.
 - **`KiroraOptions(clientKey = …)`**: `clientKey` is required. It defaulted to `""`, which was
   always refused at run time. **Action:** pass it (every integration already does).
 - **`KiroraState`** is a plain class, not a `data class`: no `copy()`, destructuring or public

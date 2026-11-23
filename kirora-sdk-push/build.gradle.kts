@@ -1,7 +1,6 @@
 plugins {
     alias(libs.plugins.android.library)
-    `maven-publish`
-    signing
+    alias(libs.plugins.vanniktech.publish)
 }
 
 val sdkVersion = providers.gradleProperty("kiroraSdkVersion").get()
@@ -32,64 +31,49 @@ android {
         unitTests.isIncludeAndroidResources = true
     }
 
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-            withJavadocJar()
+}
+
+// Maven Central: uploaded and validated by `publishToMavenCentral` (the release workflow, on a
+// version tag); released by hand in the Central Portal. Signed with ORG_GRADLE_PROJECT_signingInMemoryKey
+// and ...KeyPassword; Central's user token in ORG_GRADLE_PROJECT_mavenCentralUsername / ...Password.
+mavenPublishing {
+    publishToMavenCentral(automaticRelease = false)
+    if (providers.gradleProperty("signingInMemoryKey").isPresent) signAllPublications()
+    coordinates("io.kirora", "android-sdk-push", sdkVersion)
+    configure(com.vanniktech.maven.publish.AndroidSingleVariantLibrary(variant = "release", sourcesJar = true, publishJavadocJar = true))
+    pom {
+        name.set("Kirora Android SDK Push")
+        description.set("Firebase Cloud Messaging support for the Kirora Android SDK.")
+        url.set("https://www.kirora.io")
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/licenses/MIT")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("kirora")
+                name.set("Kirora")
+                url.set("https://www.kirora.io")
+            }
+        }
+        scm {
+            url.set("https://github.com/kiroratech/kirora-android")
+            connection.set("scm:git:https://github.com/kiroratech/kirora-android.git")
+            developerConnection.set("scm:git:ssh://git@github.com/kiroratech/kirora-android.git")
         }
     }
 }
 
-afterEvaluate {
-    publishing {
-        publications {
-            register<MavenPublication>("release") {
-                groupId = "com.kirora"
-                artifactId = "android-sdk-push"
-                version = sdkVersion
-
-                from(components["release"])
-
-                pom {
-                    name.set("Kirora Android SDK Push")
-                    description.set("Firebase Cloud Messaging support for the Kirora Android SDK.")
-                    url.set("https://www.kirora.io")
-                    licenses {
-                        license {
-                            name.set("MIT License")
-                            url.set("https://opensource.org/licenses/MIT")
-                            distribution.set("repo")
-                        }
-                    }
-                    developers {
-                        developer {
-                            id.set("kirora")
-                            name.set("Kirora")
-                            url.set("https://www.kirora.io")
-                        }
-                    }
-                    scm {
-                        url.set("https://github.com/kiroratech/kirora-android")
-                        connection.set("scm:git:https://github.com/kiroratech/kirora-android.git")
-                        developerConnection.set("scm:git:ssh://git@github.com/kiroratech/kirora-android.git")
-                    }
-                }
-            }
+// Local staging repo: `./gradlew :kirora-sdk-push:publishAllPublicationsToStagingRepository`
+publishing {
+    repositories {
+        maven {
+            name = "staging"
+            url = uri(layout.buildDirectory.dir("staging-repo"))
         }
-        repositories {
-            maven {
-                name = "staging"
-                url = uri(layout.buildDirectory.dir("staging-repo"))
-            }
-        }
-    }
-}
-
-signing {
-    val key = providers.gradleProperty("signingInMemoryKey").orNull
-    if (key != null) {
-        useInMemoryPgpKeys(key, providers.gradleProperty("signingInMemoryKeyPassword").orNull)
-        sign(publishing.publications)
     }
 }
 

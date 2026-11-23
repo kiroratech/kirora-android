@@ -1,8 +1,7 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.google.devtools.ksp)
-    `maven-publish`
-    signing
+    alias(libs.plugins.vanniktech.publish)
 }
 
 // Single source for the version: the Maven artifact, the Kirora-SDK header and event context.
@@ -60,66 +59,49 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-            withJavadocJar()
+}
+
+// Maven Central: uploaded and validated by `publishToMavenCentral` (the release workflow, on a
+// version tag); released by hand in the Central Portal. Signed with ORG_GRADLE_PROJECT_signingInMemoryKey
+// and ...KeyPassword; Central's user token in ORG_GRADLE_PROJECT_mavenCentralUsername / ...Password.
+mavenPublishing {
+    publishToMavenCentral(automaticRelease = false)
+    if (providers.gradleProperty("signingInMemoryKey").isPresent) signAllPublications()
+    coordinates("io.kirora", "android-sdk", sdkVersion)
+    configure(com.vanniktech.maven.publish.AndroidSingleVariantLibrary(variant = "release", sourcesJar = true, publishJavadocJar = true))
+    pom {
+        name.set("Kirora Android SDK")
+        description.set("Track events, identify users and receive push notifications with Kirora.")
+        url.set("https://www.kirora.io")
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/licenses/MIT")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("kirora")
+                name.set("Kirora")
+                url.set("https://www.kirora.io")
+            }
+        }
+        scm {
+            url.set("https://github.com/kiroratech/kirora-android")
+            connection.set("scm:git:https://github.com/kiroratech/kirora-android.git")
+            developerConnection.set("scm:git:ssh://git@github.com/kiroratech/kirora-android.git")
         }
     }
 }
 
-afterEvaluate {
-    publishing {
-        publications {
-            register<MavenPublication>("release") {
-                groupId = "com.kirora"
-                artifactId = "android-sdk"
-                version = sdkVersion
-
-                from(components["release"])
-
-                pom {
-                    name.set("Kirora Android SDK")
-                    description.set("Track events, identify users and receive push notifications with Kirora.")
-                    url.set("https://www.kirora.io")
-                    licenses {
-                        license {
-                            name.set("MIT License")
-                            url.set("https://opensource.org/licenses/MIT")
-                            distribution.set("repo")
-                        }
-                    }
-                    developers {
-                        developer {
-                            id.set("kirora")
-                            name.set("Kirora")
-                            url.set("https://www.kirora.io")
-                        }
-                    }
-                    scm {
-                        url.set("https://github.com/kiroratech/kirora-android")
-                        connection.set("scm:git:https://github.com/kiroratech/kirora-android.git")
-                        developerConnection.set("scm:git:ssh://git@github.com/kiroratech/kirora-android.git")
-                    }
-                }
-            }
+// Local staging repo: `./gradlew :kirora-sdk:publishAllPublicationsToStagingRepository`
+publishing {
+    repositories {
+        maven {
+            name = "staging"
+            url = uri(layout.buildDirectory.dir("staging-repo"))
         }
-        repositories {
-            // Local staging repo: `./gradlew :kirora-sdk:publishReleasePublicationToStagingRepository`
-            maven {
-                name = "staging"
-                url = uri(layout.buildDirectory.dir("staging-repo"))
-            }
-        }
-    }
-}
-
-// Signs only when a key is configured (ORG_GRADLE_PROJECT_signingInMemoryKey / ...Password).
-signing {
-    val key = providers.gradleProperty("signingInMemoryKey").orNull
-    if (key != null) {
-        useInMemoryPgpKeys(key, providers.gradleProperty("signingInMemoryKeyPassword").orNull)
-        sign(publishing.publications)
     }
 }
 

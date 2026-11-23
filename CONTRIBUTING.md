@@ -45,9 +45,24 @@ emulator or device:
 ## Local publications
 
 ```sh
-./gradlew :kirora-sdk:publishReleasePublicationToStagingRepository
-./gradlew :kirora-sdk-push:publishReleasePublicationToStagingRepository
+./gradlew :kirora-sdk:publishAllPublicationsToStagingRepository
+./gradlew :kirora-sdk-push:publishAllPublicationsToStagingRepository
 ```
 
-Each module writes under its own `build/staging-repo`. Signing happens only when signing
-properties are configured. Local staging is not a public release.
+Each module writes under its own `build/staging-repo`, signed only when a signing key is set
+(`ORG_GRADLE_PROJECT_signingInMemoryKey` and `...KeyPassword`). Local staging is not a release.
+
+## Releasing to Maven Central
+
+Both libraries are published as `io.kirora:android-sdk` and `io.kirora:android-sdk-push`.
+The `kirora-android` repository needs four Actions secrets: `MAVEN_CENTRAL_USERNAME` and
+`MAVEN_CENTRAL_PASSWORD` (a user token from central.sonatype.com), `SIGNING_KEY` (the
+ASCII-armored private key) and `SIGNING_KEY_PASSWORD`.
+
+1. Set `kiroraSdkVersion` in `gradle.properties`, and move the changelog's Unreleased section
+   under that version.
+2. Push a tag of the bare version (`0.1.0`, no `v`). The Release workflow checks the tag matches,
+   runs the tests and the API check, then uploads both libraries to Maven Central and validates
+   them.
+3. In the Central Portal (Deployments), check the deployment and press **Publish**. A release
+   can't be deleted or replaced once published.
