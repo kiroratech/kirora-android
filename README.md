@@ -40,6 +40,10 @@ dependencies {
 
 The Kotlin package is `com.kirora.androidsdk`.
 
+Building with Flutter or React Native? Use the plugin instead, which includes this SDK:
+`flutter pub add kirora_flutter` ([pub.dev](https://pub.dev/packages/kirora_flutter)) or
+`npm install @kirora/react-native` ([npm](https://www.npmjs.com/package/@kirora/react-native)).
+
 ## Create the client
 
 Create one client in your `Application`, and name that class in your manifest.
