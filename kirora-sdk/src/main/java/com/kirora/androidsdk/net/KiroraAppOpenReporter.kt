@@ -13,6 +13,7 @@ import com.kirora.androidsdk.utils.KiroraPreferences
 import com.kirora.androidsdk.utils.RetryAfter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -70,6 +71,9 @@ internal class KiroraAppOpenReporter(
     }
 
     private val flushMutex = Mutex()
+
+    /** Orders a withdrawal's deletion with the opens recorded around it. */
+    private val storeLock = Mutex()
     private val inFlight: MutableSet<Job> = ConcurrentHashMap.newKeySet()
 
     /** A cold launch happens before the app has signed the user in; it waits for that, in memory. */
@@ -82,9 +86,20 @@ internal class KiroraAppOpenReporter(
     @Volatile
     private var nextRetryAt = 0L
 
-    /** The server's `Retry-After`: no sooner, whatever else resets the backoff. */
+    /** The server's `Retry-After`: no sooner, whatever else resets the backoff. Kept across restarts. */
     @Volatile
     private var holdUntil = 0L
+
+    private val serverHold = ServerHold.stored(preferences, "app_opens")
+
+    /** A `Retry-After` saved by an earlier process, read once, before the first send. */
+    private val restoredHold = lazy(this) {
+        serverHold.restore(clock())?.let { until ->
+            holdUntil = max(holdUntil, until)
+            // Nothing else may come along when it ends: retry then.
+            armRetry()
+        }
+    }
 
     @Volatile
     private var destroyed = false
@@ -92,11 +107,10 @@ internal class KiroraAppOpenReporter(
     private var retryJob: Job? = null
 
     /** The app opened or returned to the foreground. */
-    fun onAppOpen() {
+    fun onAppOpen(user: SignedInUser? = identity.user) {
         if (destroyed || !trackingAllowed()) return
         val now = clock()
         if (withinWindow(now)) return
-        val user = identity.user
         if (user == null) pending = now else record(user, now)
     }
 
@@ -118,14 +132,17 @@ internal class KiroraAppOpenReporter(
         }
     }
 
-    /** Tracking withdrawn: forget every queued open and stop sending. */
-    fun clearAll() {
+    /**
+     * Tracking withdrawn: forget every queued open and stop sending. The deletion asks
+     * [stillRefused] once it holds the store, so an open recorded after a grant meanwhile is kept.
+     */
+    fun clearAll(stillRefused: () -> Boolean = { true }) {
         pending = null
         lastOpen = 0L
         preferences.clearLastAppOpen()
         inFlight.forEach { it.cancel() }
         retryJob?.cancel()
-        scope.launch { dao?.let { purges.purgeAll(it) } }
+        scope.launch { storeLock.withLock { if (stillRefused()) dao?.let { purges.purgeAll(it) } } }
     }
 
     fun destroy() {
@@ -155,7 +172,7 @@ internal class KiroraAppOpenReporter(
         launchTracked {
             val d = dao ?: return@launchTracked
             if (!purges.settle(d)) return@launchTracked
-            d.insertAndTrim(AppOpenEntity(occurredAt = at, pushAppId = pushAppId, owner = user.subject), MAX_QUEUED)
+            storeLock.withLock { d.insertAndTrim(AppOpenEntity(occurredAt = at, pushAppId = pushAppId, owner = user.subject), MAX_QUEUED) }
             doFlush()
         }
     }
@@ -167,7 +184,8 @@ internal class KiroraAppOpenReporter(
 
     private fun launchTracked(block: suspend () -> Unit) {
         if (destroyed) return
-        val job = scope.launch {
+        // Registered before it starts, so a consent withdrawal or destroy() can't miss it.
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 block()
             } catch (e: CancellationException) {
@@ -178,11 +196,13 @@ internal class KiroraAppOpenReporter(
         }
         inFlight.add(job)
         job.invokeOnCompletion { inFlight.remove(job) }
+        job.start()
     }
 
     private suspend fun doFlush() = flushMutex.withLock {
         val d = dao ?: return@withLock
         val user = identity.user ?: return@withLock
+        restoredHold.value
         if (!trackingAllowed() || clock() < max(nextRetryAt, holdUntil)) return@withLock
         // Kirora refused this token and nothing can replace it but identify(): waiting, not retrying.
         if (user.waitingForToken) return@withLock
@@ -232,6 +252,10 @@ internal class KiroraAppOpenReporter(
                 user.accepted()
                 backoffMs = FIRST_RETRY_MS
                 nextRetryAt = 0L
+                if (holdUntil > 0) {
+                    holdUntil = 0L
+                    serverHold.save(0L)
+                }
                 Result.DONE
             }
             // 404: not registered to this user in that push app (the next start registers it). 400: out of range.
@@ -256,12 +280,19 @@ internal class KiroraAppOpenReporter(
         RetryAfter.parse(response?.headers(), clock())?.let {
             delayMs = max(it, delayMs)
             holdUntil = clock() + it
+            serverHold.save(holdUntil)
         }
         nextRetryAt = clock() + delayMs
         backoffMs = min(backoffMs * 2, MAX_RETRY_MS)
-        // Nothing else may come along to retry, so the retry waits for itself, re-armed for the
-        // latest hold (a longer Retry-After since): one armed earlier would find the hold and stop.
-        // Safe to replace: the job only starts a flush, which runs on its own.
+        armRetry()
+    }
+
+    /**
+     * Nothing else may come along to retry, so the retry waits for itself, re-armed for the latest
+     * hold (a longer Retry-After since): one armed earlier would find the hold and stop. Safe to
+     * replace: the job only starts a flush, which runs on its own.
+     */
+    private fun armRetry() {
         if (destroyed) return
         val retryAt = max(nextRetryAt, holdUntil)
         retryJob?.cancel()

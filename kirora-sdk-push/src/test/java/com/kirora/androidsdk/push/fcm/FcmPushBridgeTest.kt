@@ -27,6 +27,23 @@ internal class FcmPushBridgeTest {
     }
 
     @Test
+    fun firebaseTasksAreAwaitedWithoutTheMainThreadAndARegistrationWithNoResultCountsAsDone() = kotlinx.coroutines.runBlocking {
+        val registered: com.google.android.gms.tasks.Task<Void> = com.google.android.gms.tasks.Tasks.forResult(null)
+        assertEquals(true, registered.succeeded())
+        assertEquals(false, com.google.android.gms.tasks.Tasks.forException<Void>(Exception("down")).succeeded())
+        assertEquals("fid-1", com.google.android.gms.tasks.Tasks.forResult("fid-1").await())
+        assertEquals(null, com.google.android.gms.tasks.Tasks.forException<String>(Exception("down")).await())
+    }
+
+    @Test
+    fun installationIdModeFollowsTheAppsManifestFlag() {
+        assertEquals(false, FcmPushBridge().registersByInstallationId(context))
+        shadowOf(context.packageManager).getInternalMutablePackageInfo(context.packageName).applicationInfo!!.metaData =
+            android.os.Bundle().apply { putBoolean("firebase_messaging_installation_id_enabled", true) }
+        assertEquals(true, FcmPushBridge().registersByInstallationId(context))
+    }
+
+    @Test
     fun theNotificationPromptAnswerComesBackThroughTheBridge() {
         val results = mutableListOf<Boolean?>()
         FcmPushBridge().requestNotificationPermission(context) { results.add(it) }

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
 import com.kirora.androidsdk.push.PushDisplayConfig
+import com.kirora.androidsdk.push.PushTarget
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -147,10 +148,18 @@ internal class KiroraPreferences(context: Context, private val namespace: String
     // ---- Device id ------------------------------------------------------------------------
 
     /** A random id made on first use; never a hardware or advertising id. */
+    fun getDeviceId(): String = getDeviceId { true }!!
+
+    /**
+     * The device id, made now only if [mayCreate] still allows it: asked under the same lock as
+     * [forgetDeviceId], so an id forgotten as tracking consent is withdrawn isn't made again by an
+     * event captured just before. Null when there is none and it may not be made.
+     */
     @Synchronized
-    fun getDeviceId(): String {
+    fun getDeviceId(mayCreate: () -> Boolean): String? {
         val deviceId = prefs.getString(KEY_DEVICE_ID, null)
         if (!deviceId.isNullOrEmpty()) return deviceId
+        if (!mayCreate()) return null
         val newId = UUID.randomUUID().toString()
         prefs.edit().putString(KEY_DEVICE_ID, newId).apply()
         return newId
@@ -173,7 +182,8 @@ internal class KiroraPreferences(context: Context, private val namespace: String
     fun peekDeviceId(): String? = prefs.getString(KEY_DEVICE_ID, null)?.takeIf { it.isNotEmpty() }
 
     @Synchronized
-    fun forgetDeviceId() {
+    fun forgetDeviceId(onlyIf: () -> Boolean = { true }) {
+        if (!onlyIf()) return
         // The secret goes with the installation it belongs to.
         prefs.edit().remove(KEY_DEVICE_ID).remove(KEY_DEVICE_SECRET).apply()
     }
@@ -312,6 +322,17 @@ internal class KiroraPreferences(context: Context, private val namespace: String
         prefs.edit().remove(KEY_LAST_APP_OPEN).apply()
     }
 
+    /**
+     * The end (epoch ms) of the server's `Retry-After` for [sender] (`events`, `app_opens`), kept
+     * so a restart doesn't send sooner; 0 when none.
+     */
+    fun getServerHold(sender: String): Long = prefs.getLong("$KEY_SERVER_HOLD$sender", 0L)
+
+    fun setServerHold(sender: String, until: Long) {
+        val key = "$KEY_SERVER_HOLD$sender"
+        prefs.edit().apply { if (until > 0) putLong(key, until) else remove(key) }.apply()
+    }
+
     /** Deletions of stored [table] rows that failed and are still owed (see `PendingPurges`). */
     fun pendingPurges(table: String): String? = prefs.getString("$KEY_PENDING_PURGES$table", null)
 
@@ -368,6 +389,7 @@ internal class KiroraPreferences(context: Context, private val namespace: String
         const val KEY_SESSION_OWNER = "session_owner"
         const val KEY_LAST_ACTIVITY_TIME = "last_activity_time"
         const val KEY_LAST_APP_OPEN = "last_app_open"
+        const val KEY_SERVER_HOLD = "server_hold_"
         const val KEY_PENDING_PURGES = "pending_purges_"
         const val KEY_LAST_APP_VERSION = "last_app_version"
         const val KEY_LAST_APP_BUILD = "last_app_build"
@@ -393,7 +415,7 @@ internal class GlobalPreferences(context: Context) {
         if (checked) return
         synchronized(GlobalPreferences::class.java) {
             if (checked) return
-            forgetIfRestoredFromBackup(app, "kirora_install_global") { prefs.edit().remove(KEY_PUSH_TOKEN).commit() }
+            forgetIfRestoredFromBackup(app, "kirora_install_global") { prefs.edit().remove(KEY_PUSH_TOKEN).remove(KEY_PUSH_INSTALLATION_ID).commit() }
             // Only once the token is gone: until then, other callers wait here, so none reads the
             // restored token or has a fresh one it saved meanwhile cleared.
             checked = true
@@ -406,10 +428,17 @@ internal class GlobalPreferences(context: Context) {
 
     fun getApiUrl(): String? = prefs.getString(KEY_API_URL, null)
 
-    fun getPushToken(): String? {
+    /**
+     * The device's push identifier of [kind] (`fcm_token` or `firebase_installation_id`). Each kind
+     * is kept apart, so one never stands in for the other (an app update that switched Firebase's
+     * mode, or a value forwarded from the mode the app isn't in).
+     */
+    fun getPushToken(kind: String = PushTarget.FCM_TOKEN): String? {
         forgetIfRestored()
-        return prefs.getString(KEY_PUSH_TOKEN, null)
+        return prefs.getString(pushKey(kind), null)
     }
+
+    private fun pushKey(kind: String) = if (kind == PushTarget.FIREBASE_INSTALLATION_ID) KEY_PUSH_INSTALLATION_ID else KEY_PUSH_TOKEN
 
     /** The app install (its `lastUpdateTime`) in which a wrapper last installed push at launch; 0 for none. */
     fun wrapperPushInstall(): Long = prefs.getLong(KEY_WRAPPER_PUSH_INSTALL, 0L)
@@ -418,9 +447,10 @@ internal class GlobalPreferences(context: Context) {
         prefs.edit().putLong(KEY_WRAPPER_PUSH_INSTALL, appUpdateTime).apply()
     }
 
-    fun setPushToken(token: String?) {
+    fun setPushToken(token: String?, kind: String = PushTarget.FCM_TOKEN) {
         forgetIfRestored()
-        if (token == null) prefs.edit().remove(KEY_PUSH_TOKEN).apply() else prefs.edit().putString(KEY_PUSH_TOKEN, token).apply()
+        val key = pushKey(kind)
+        prefs.edit().apply { if (token == null) remove(key) else putString(key, token) }.apply()
     }
 
     fun savePushDisplay(smallIcon: Int?, accentColor: Int?, channelId: String, channelName: String) {
@@ -465,6 +495,7 @@ internal class GlobalPreferences(context: Context) {
 
         private const val KEY_API_URL = "kirora_api_url"
         private const val KEY_PUSH_TOKEN = "kirora_push_token"
+        private const val KEY_PUSH_INSTALLATION_ID = "kirora_push_installation_id"
         private const val KEY_WRAPPER_PUSH_INSTALL = "wrapper_push_install"
         private const val KEY_PUSH_ICON_NAME = "kirora_push_icon_name"
         private const val KEY_PUSH_HAS_COLOR = "kirora_push_has_color"

@@ -4,12 +4,15 @@ import androidx.annotation.ColorInt
 import androidx.annotation.DrawableRes
 
 /**
- * SDK configuration. Deliberately not a `data class`: new options can be added without breaking
- * binary compatibility. Use named arguments.
+ * SDK configuration: [clientKey], then any options by name.
+ *
+ * Not a `data class`, so options can be added. Once released, the constructor's shape is part of
+ * the binary API (checked against `api/`): a new option goes last, with a default, and the
+ * previous constructor stays, hidden, so apps built against the earlier version keep working.
  */
 public class KiroraOptions @JvmOverloads constructor(
     /** The workspace's public key (`kirora_pk_…`), safe to ship. */
-    public val clientKey: String = "",
+    public val clientKey: String,
     /**
      * Asks the app's server for a signed user token. Called by `identify()` without a token and
      * when Kirora refuses an expired one. One that hasn't answered after 30 seconds counts as failed.

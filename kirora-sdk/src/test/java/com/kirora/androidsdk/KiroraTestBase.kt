@@ -16,7 +16,12 @@ import org.junit.Before
 
 /** Firebase as the SDK sees it: a token, and a prompt that answers [answer]. */
 internal class FakePushBridge(var token: String? = "fcm-1", var answer: Boolean? = true) : KiroraPushBridge {
+    /** Firebase's installation-ID mode, as the app's manifest would set it. */
+    var byInstallationId = false
+    var installationId: String? = "fid-1"
     override suspend fun fetchToken(): String? = token
+    override fun registersByInstallationId(context: Context): Boolean = byInstallationId
+    override suspend fun fetchInstallationId(): String? = installationId
     override fun requestNotificationPermission(context: Context, onResult: (granted: Boolean?) -> Unit) = onResult(answer)
 }
 
@@ -31,6 +36,7 @@ internal abstract class KiroraTestBase {
         Kirora.resetForTesting()
         fake = FakeKiroraApiService()
         GlobalPreferences(context).setPushToken(null)
+        GlobalPreferences(context).setPushToken(null, com.kirora.androidsdk.push.PushTarget.FIREBASE_INSTALLATION_ID)
     }
 
     @After
@@ -40,13 +46,13 @@ internal abstract class KiroraTestBase {
 
     /** A client on a fresh queue, talking to [fake]. */
     protected fun start(
-        options: KiroraOptions = KiroraOptions(trackSessions = false),
+        options: KiroraOptions = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false),
         clearQueue: Boolean = true,
         clock: () -> Long = System::currentTimeMillis
     ): Kirora {
         // A restart reads what the previous client saved.
         runBlocking { Kirora.awaitConsentSavedForTesting() }
-        val kirora = Kirora(context, options.withClientKey("kirora_pk_test"), KiroraEnvironment(clock = clock, pushBridge = bridge, apiService = fake))
+        val kirora = Kirora(context, options, KiroraEnvironment(clock = clock, pushBridge = bridge, apiService = fake))
         runBlocking {
             kirora.awaitReady()
             if (clearQueue) {
@@ -58,7 +64,7 @@ internal abstract class KiroraTestBase {
     }
 
     /** A client with user-a signed in. */
-    protected suspend fun signedIn(options: KiroraOptions = KiroraOptions(trackSessions = false)): Kirora =
+    protected suspend fun signedIn(options: KiroraOptions = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false)): Kirora =
         start(options).also { it.identify(jwt("user-a")) }
 
     protected suspend fun Kirora.queued(): Int = databaseForTesting!!.eventDao().getCount()
@@ -76,7 +82,7 @@ internal abstract class KiroraTestBase {
      */
     protected suspend fun withSignInUnderWay(push: KiroraPushOptions? = null, during: suspend (Kirora) -> Unit) = coroutineScope {
         val token = CompletableDeferred<String>()
-        val kirora = start(KiroraOptions(trackSessions = false, fetchUserToken = { token.await() }, push = push))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, fetchUserToken = { token.await() }, push = push))
         val signingIn = launch { runCatching { kirora.identify() } }
         waitUntil(message = "sign-in under way") { kirora.identity.signInUnderWay }
         during(kirora)

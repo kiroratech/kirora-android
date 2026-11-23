@@ -24,7 +24,7 @@ internal class ConsentConformanceTest : KiroraTestBase() {
 
     @Test
     fun aRefusalStopsCollectionEvenWithoutRequiredConsentAndIsRemembered() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = true))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = true))
         kirora.track("Before")
         waitUntil(message = "the event queued") { kirora.queued() >= 1 }
         kirora.setTrackingConsent(false)
@@ -37,7 +37,7 @@ internal class ConsentConformanceTest : KiroraTestBase() {
         kirora.waitQueued(0)
 
         // A remembered refusal always wins, in the next client too.
-        val next = start(KiroraOptions(trackSessions = true), clearQueue = false)
+        val next = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = true), clearQueue = false)
         next.track("Next start")
         delay(100)
         next.waitQueued(0)
@@ -46,7 +46,7 @@ internal class ConsentConformanceTest : KiroraTestBase() {
 
     @Test
     fun withRequiredConsentNothingIsStoredUntilGrantedAndThenFromThatPointOnly() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = true, requireTrackingConsent = true))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = true, requireTrackingConsent = true))
         kirora.track("Too early")
         delay(100)
         kirora.waitQueued(0)
@@ -76,7 +76,7 @@ internal class ConsentConformanceTest : KiroraTestBase() {
 
     @Test
     fun operationalPushContinuesWhenTrackingIsRefused() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         kirora.setTrackingConsent(false)
         kirora.identify(token)
         // Registration and its device id are operational: still allowed.
@@ -104,7 +104,7 @@ internal class ConsentConformanceTest : KiroraTestBase() {
 
     @Test
     fun marketingConsentIsSeparateFromTrackingConsent() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions(), requireTrackingConsent = true))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions(), requireTrackingConsent = true))
         kirora.identify(token)
         kirora.setPushConsent(true)
         assertFalse(kirora.trackingConsent)

@@ -22,8 +22,8 @@ internal class ConsentStorageTest : KiroraTestBase() {
     private val namespace get() = KiroraNamespace.of("https://api.kirora.io", "kirora_pk_test")
     private val mainStore: SharedPreferences get() = context.getSharedPreferences("kirora_$namespace", 0)
     private val refusalCopy get() = File(context.noBackupFilesDir, "kirora_tracking_refused_$namespace")
-    private val optional = KiroraOptions(trackSessions = false)
-    private val required = KiroraOptions(trackSessions = false, requireTrackingConsent = true)
+    private val optional = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false)
+    private val required = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, requireTrackingConsent = true)
 
     /** A main store that throws when read, as a value of the wrong type makes it. Call after a first start. */
     private fun saved() = runBlocking { Kirora.awaitConsentSavedForTesting() }
@@ -143,7 +143,7 @@ internal class ConsentStorageTest : KiroraTestBase() {
         try {
             first.setTrackingConsent(false)
             // Created straight away, before the refusal reaches storage.
-            val replacement = Kirora(context, optional.withClientKey("kirora_pk_test"), KiroraEnvironment())
+            val replacement = Kirora(context, optional, KiroraEnvironment())
             assertFalse(replacement.trackingConsent)
         } finally {
             release.countDown()

@@ -6,7 +6,7 @@ your app needs push notifications.
 
 **Preview, version 0.1.0.** Android 7.0 (API 24) and later. Your app must compile against
 API 35 or later and use Kotlin 2.1 or later. The SDK is not yet published to a public Maven
-repository, and push has not yet been checked on physical devices.
+repository.
 
 ### Words this guide uses
 
@@ -70,9 +70,15 @@ class App : Application() {
 <application android:name=".App" ... />
 ```
 
+`clientKey` is required; pass every other option by name, since their order isn't fixed.
 Use your workspace's **client key** (`kirora_pk_…`). The token secret and integration keys
 belong on your server; never ship them in the app. A secret key (`kirora_sk_…`) passed as
 `clientKey` is refused: the client logs an error and does nothing.
+
+The SDK learns when your app is on screen from AndroidX's `ProcessLifecycleOwner`, which
+`androidx.startup`'s `InitializationProvider` sets up. Keep that provider in your manifest:
+without it, the SDK logs an error and follows only activities started after the client was
+created.
 
 `Kirora.active` points to the most recently created client. Creating another destroys the
 previous one. A replacement for the same client key and API URL keeps the signed-in user;
@@ -196,7 +202,8 @@ user signs in.
 
 Events are sent once 20 are queued, otherwise within 30 seconds, and when the app goes to
 the background. A batch holds up to 100 events. `flush()` sends now, skipping the SDK's own
-retry delay but not tracking consent or the server's `Retry-After`. Neither `flush()` nor
+retry delay but not tracking consent or the server's `Retry-After`, which is kept across
+restarts. Neither `flush()` nor
 `track()` returning means Kirora accepted the events.
 
 The queue keeps up to 1,000 events and 1 MB, dropping the oldest first, and survives
@@ -297,7 +304,7 @@ permission allows. Granting the permission also turns push back on.
 
 The push library includes a Firebase messaging service. If it handles your app's messages,
 register `KiroraPush.setFallbackMessageHandler` early to receive the ones that aren't
-Kirora's. If your app has its own service, forward both callbacks instead:
+Kirora's. If your app has its own service, forward its callbacks instead:
 
 ```kotlin
 import com.google.firebase.messaging.FirebaseMessagingService
@@ -313,8 +320,17 @@ class AppMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
         KiroraPush.onNewToken(this, token)
     }
+
+    // Only called when Firebase registers by installation ID (below).
+    override fun onRegistered(installationId: String) {
+        KiroraPush.onRegistered(this, installationId)
+    }
 }
 ```
+
+If your app (or another SDK in it) turns on Firebase's installation-ID registration
+(`firebase_messaging_installation_id_enabled` in the manifest), the SDK registers the device by
+its installation ID instead of an FCM token, with nothing for you to change.
 
 Declare it with the Firebase messaging intent filter and `android:exported="false"`, and
 check the merged manifest to confirm which service receives messages. `handleMessage`
@@ -353,7 +369,7 @@ kirora.getStateAsync { state ->
 }
 ```
 
-`getState()` is the suspend form. It makes no network request and doesn't prompt.
+`pushToken` is the FCM token, or the installation ID in that mode. `getState()` is the suspend form. It makes no network request and doesn't prompt.
 `queuedEventCount` counts waiting events for every user; it isn't a delivery receipt.
 
 | Operation | Coroutine form | Callback form |

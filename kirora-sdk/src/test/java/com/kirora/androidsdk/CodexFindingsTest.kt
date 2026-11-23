@@ -14,7 +14,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 internal class CodexFindingsTest : KiroraTestBase() {
-    private val sessions = KiroraOptions(trackSessions = true)
+    private val sessions = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = true)
 
     @Test
     fun whatIsTrackedRightAfterASignOutBeginsIsNotOnTheOutgoingVisit() = runBlocking {

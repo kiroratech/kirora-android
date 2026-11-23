@@ -53,7 +53,7 @@ internal class AuditRoundTwoTest : KiroraTestBase() {
 
     @Test
     fun theDetachIsCapturedWithoutWaitingBehindTheEventQueue() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         kirora.identify(jwt("user-a"))
         val release = CountDownLatch(1)
         Kirora.holdQueueForTesting(release) // a slow queue: the sign-out's drop waits behind it
@@ -68,7 +68,7 @@ internal class AuditRoundTwoTest : KiroraTestBase() {
 
     @Test
     fun aTokenRefusedForPushHoldsTheManualFlushToo() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         kirora.identify(jwt("user-a"))
         kirora.track("E")
         kirora.waitQueued(1)

@@ -17,6 +17,12 @@ internal class KiroraFirebaseService : FirebaseMessagingService() {
         KiroraPush.onNewToken(applicationContext, token)
     }
 
+    // Firebase's installation-ID mode: the installation ID this device is now registered by.
+    override fun onRegistered(installationId: String) {
+        super.onRegistered(installationId)
+        KiroraPush.onRegistered(applicationContext, installationId)
+    }
+
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         super.onMessageReceived(remoteMessage)
         KiroraPush.handleMessage(applicationContext, remoteMessage)

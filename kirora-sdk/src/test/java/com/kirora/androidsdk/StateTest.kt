@@ -24,7 +24,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 internal class StateTest : KiroraTestBase() {
-    private val pushOptions = KiroraOptions(trackSessions = false, push = KiroraPushOptions())
+    private val pushOptions = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions())
 
     @Test
     fun aFreshClientAnswersWithoutCreatingAnything() = runBlocking {

@@ -82,6 +82,32 @@ class SessionManagerTest {
     }
 
     @Test
+    fun sessionStartedIsQueuedBeforeTheInstallWhenEachEventCapturesItsActivity() {
+        // As the client does: tracking an event first captures activity, then queues the event.
+        var m: SessionManager? = null
+        m = SessionManager(
+            preferences, trackSessions = true, trackAppLifecycle = true, appVersion = "1", appBuild = "1",
+            trackEvent = { name, properties -> m!!.onActivity(); tracked.add(name to properties) },
+            owner = { null }, onBackground = {}, processLifecycle = { ProcessLifecycleOwner.get().lifecycle }
+        )
+        m.ensureBegun()
+        assertEquals(listOf("Session Started", "Application Installed"), names)
+    }
+
+    @Test
+    fun theInstallIsTrackedOnceConsentBecomesReadableAfterStart() {
+        // Storage locked until the first unlock: consent couldn't be read at start.
+        trackingAllowed = false
+        val m = manager(trackSessions = false, lifecycle = true).begun()
+        assertTrue(tracked.isEmpty())
+        // Readable now, and allowed: no grant, just the next activity.
+        trackingAllowed = true
+        m.onActivity()
+        m.onActivity()
+        assertEquals(listOf("Application Installed"), names)
+    }
+
+    @Test
     fun nothingWhileTrackingIsDisallowedAndNothingSkippedIsMadeUp() {
         trackingAllowed = false
         val m = manager(lifecycle = true).begun()
@@ -133,6 +159,46 @@ class SessionManagerTest {
         now += SessionManager.SESSION_TIMEOUT_MS - 60_000
         m.onStart(app)
         assertEquals(second, m.sessionId)
+    }
+
+    @Test
+    fun aLaunchStillWaitingForStartUpWhenItsClientIsReplacedIsCountedByTheReplacement() {
+        val owner = FakeProcess()
+        val held = mutableListOf<() -> Unit>()
+        fun manager(hold: Boolean) = SessionManager(
+            preferences, trackSessions = false, trackAppLifecycle = true, appVersion = "1", appBuild = "1",
+            trackEvent = { name, properties -> tracked.add(name to properties) }, owner = { null },
+            onBackground = {}, onAppOpen = { opens++ }, processLifecycle = { owner.lifecycle },
+            whenStartedUp = { change -> if (hold) held += change else change() }
+        )
+        val first = manager(hold = true).begun()
+        owner.registry.handleLifecycleEvent(Lifecycle.Event.ON_START) // waits for first's start-up
+        first.stop()
+        manager(hold = false).begun() // the replacement hears the start replayed
+        held.forEach { it() } // the first's, run late: it's stopped, and counts nothing
+        assertEquals(1, opens)
+        assertEquals(listOf(false), tracked.filter { it.first == "Application Opened" }.map { it.second?.get("from_background") })
+    }
+
+    @Test
+    fun aReplacementsReplayedStartHeldForStartUpIsStillNotCountedAgain() {
+        val owner = FakeProcess()
+        val held = mutableListOf<() -> Unit>()
+        fun manager(hold: Boolean) = SessionManager(
+            preferences, trackSessions = false, trackAppLifecycle = true, appVersion = "1", appBuild = "1",
+            trackEvent = { name, properties -> tracked.add(name to properties) }, owner = { null },
+            onBackground = {}, onAppOpen = { opens++ }, processLifecycle = { owner.lifecycle },
+            whenStartedUp = { change -> if (hold) held += change else change() }
+        )
+        val first = manager(hold = false).begun()
+        owner.registry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        first.stop()
+        // The replacement's start-up hasn't read storage yet: the replayed start waits for it.
+        manager(hold = true).begun()
+        assertEquals(1, held.size)
+        held.forEach { it() }
+        assertEquals(1, opens)
+        assertEquals(1, names.count { it == "Application Opened" })
     }
 
     @Test

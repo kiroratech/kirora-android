@@ -41,7 +41,7 @@ internal class WrapperSupportTest : KiroraTestBase() {
     }
 
     private fun tap(link: String): KiroraPushTrampolineActivity {
-        start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         val intent = Intent(context, KiroraPushTrampolineActivity::class.java)
             .putExtra("kirora", "true")
             .putExtra("link", link)

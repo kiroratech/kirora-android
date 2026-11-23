@@ -35,4 +35,10 @@ public object KiroraPush {
     public fun onNewToken(context: Context, token: String) {
         Kirora.handleNewPushToken(context, token)
     }
+
+    /** Call from your own `onRegistered` (Firebase's installation-ID mode). */
+    @JvmStatic
+    public fun onRegistered(context: Context, installationId: String) {
+        Kirora.handlePushRegistered(context, installationId)
+    }
 }

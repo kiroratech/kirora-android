@@ -22,9 +22,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.ProcessLifecycleOwner
 import com.kirora.androidsdk.Kirora
 import com.kirora.androidsdk.model.KiroraPushOptions
+import com.kirora.androidsdk.utils.AppLifecycle
 import com.kirora.androidsdk.utils.KiroraLogger
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -129,7 +129,7 @@ internal object KiroraPushDisplay {
     @Volatile
     var foregroundCheck: () -> Boolean = {
         try {
-            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+            AppLifecycle.get().currentState.isAtLeast(Lifecycle.State.STARTED)
         } catch (_: Throwable) {
             false
         }

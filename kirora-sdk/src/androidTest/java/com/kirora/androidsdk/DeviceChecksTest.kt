@@ -25,6 +25,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
 import java.util.Collections
+import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -269,6 +270,32 @@ class DeviceChecksTest {
 
     @Test
     fun creatingTheClientReadsNothingFromDiskOnTheMainThread() {
+        assertNoDiskAccessOnTheMainThread { key ->
+            Kirora(context, KiroraOptions(clientKey = key, trackSessions = true, push = KiroraPushOptions()))
+        }
+    }
+
+    @Test
+    fun trackingStraightAfterCreatingTheClientReadsNothingFromDiskOnTheMainThread() {
+        // Start-up held back until the events are tracked, so they come before its reads, every time.
+        val startUp = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val release = java.util.concurrent.CountDownLatch(1)
+        startUp.execute { release.await() }
+        try {
+            assertNoDiskAccessOnTheMainThread { key ->
+                Kirora(context, KiroraOptions(clientKey = key, trackSessions = true), KiroraEnvironment(io = startUp.asCoroutineDispatcher())).apply {
+                    track("Launched", mapOf("cold" to true))
+                    trackScreenView("Home")
+                }
+            }
+        } finally {
+            release.countDown()
+            startUp.shutdown()
+        }
+    }
+
+    /** Runs [onMain] with a fresh workspace's key, failing on any SDK disk access on the main thread. */
+    private fun assertNoDiskAccessOnTheMainThread(onMain: (key: String) -> Unit) {
         assumeTrue("StrictMode's listener needs Android 9", Build.VERSION.SDK_INT >= 28)
         // A client of a fresh workspace each run, so nothing is already loaded in memory.
         val key = "kirora_pk_strict_${System.nanoTime()}"
@@ -287,7 +314,7 @@ class DeviceChecksTest {
                     }
                     .build()
             )
-            Kirora(context, KiroraOptions(clientKey = key, trackSessions = true, push = KiroraPushOptions()))
+            onMain(key)
         }
         try {
             // StrictMode reports a main-thread violation once the looper is idle, through the policy

@@ -40,7 +40,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 internal class PushAuditTest : KiroraTestBase() {
-    private val pushOptions = KiroraOptions(trackSessions = false, push = KiroraPushOptions())
+    private val pushOptions = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions())
     @After
     fun cleanUp() {
         context.notifications.cancelAll()
@@ -153,7 +153,7 @@ internal class PushAuditTest : KiroraTestBase() {
 
     @Test
     fun allowedLinkSchemesAndBlockedSchemesStillApplyToOtherApps() = runBlocking {
-        start(KiroraOptions(trackSessions = false, push = KiroraPushOptions(allowedLinkSchemes = setOf("https"))))
+        start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions(allowedLinkSchemes = setOf("https"))))
         assertFalse(KiroraPushTrampolineActivity.openAction(context, "tel:+15551234"))
         assertFalse(KiroraPushTrampolineActivity.openAction(context, "intent://x#Intent;end"))
         assertNull(context.startedLink())

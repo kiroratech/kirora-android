@@ -19,6 +19,14 @@ server accepted an operation. The token you type into it is stored by the sample
 settings code: use disposable test credentials, and don't copy it for production
 authentication.
 
+## Public API
+
+Each library's public API is recorded in its `api/` file, and CI fails when a change would
+break apps built against it. After an intended API change, record it with `./gradlew apiDump`
+and commit the updated file. After 1.0, add a new option last, with a default, and keep the
+previous constructor (hidden with `@Deprecated(level = DeprecationLevel.HIDDEN)`), so the
+recorded constructors stay.
+
 ## Tests
 
 Unit tests (Robolectric):
@@ -33,9 +41,6 @@ emulator or device:
 ```sh
 ./gradlew :kirora-sdk:connectedDebugAndroidTest
 ```
-
-Physical-device FCM checks (foreground, background, terminated launch, permission changes)
-are still to do.
 
 ## Local publications
 

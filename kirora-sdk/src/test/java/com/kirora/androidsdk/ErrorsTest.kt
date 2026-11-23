@@ -84,7 +84,7 @@ internal class ErrorsTest : KiroraTestBase() {
 
     @Test
     fun aRefusedTokenAsksFetchUserTokenOnceThenThrowsTheTokensError() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = false, fetchUserToken = { throw IllegalStateException("down") }))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, fetchUserToken = { throw IllegalStateException("down") }))
         kirora.identify(jwt("user-a"))
         fake.consentResponder = { FakeKiroraApiService.error(401, "UNAUTHORIZED") }
         thrown<UserTokenError> { runBlocking { kirora.setPushConsent(true) } }
@@ -150,7 +150,7 @@ internal class ErrorsTest : KiroraTestBase() {
 
     private fun authFailures(fetch: suspend () -> String?): Pair<KiroraOptions, MutableList<AuthFailureReason>> {
         val seen = java.util.Collections.synchronizedList(mutableListOf<AuthFailureReason>())
-        return KiroraOptions(trackSessions = false, fetchUserToken = fetch, onAuthenticationFailed = { seen.add(it) }) to seen
+        return KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, fetchUserToken = fetch, onAuthenticationFailed = { seen.add(it) }) to seen
     }
 
     @Test
@@ -159,6 +159,7 @@ internal class ErrorsTest : KiroraTestBase() {
         var thread: Thread? = null
         val (options, seen) = authFailures { if (++calls == 1) jwt("user-a") else throw IOException("down") }
         val kirora = start(KiroraOptions(
+            clientKey = "kirora_pk_test",
             trackSessions = false,
             fetchUserToken = options.fetchUserToken,
             onAuthenticationFailed = { thread = Thread.currentThread(); seen.add(it) }
@@ -205,7 +206,7 @@ internal class ErrorsTest : KiroraTestBase() {
     @Test
     fun a401WithNoFreshTokenToTryIsRefusedAndReportedAgainOnlyAfterASuccess() = runBlocking {
         val seen = java.util.Collections.synchronizedList(mutableListOf<AuthFailureReason>())
-        val kirora = start(KiroraOptions(trackSessions = false, onAuthenticationFailed = { seen.add(it) }))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, onAuthenticationFailed = { seen.add(it) }))
         kirora.identify(jwt("user-a"))
         fake.batchResponder = { _, _ -> FakeKiroraApiService.error(401, "UNAUTHORIZED") }
         kirora.track("E1")
@@ -235,7 +236,7 @@ internal class ErrorsTest : KiroraTestBase() {
     @Test
     fun aUserSigningOutIsNotReported() = runBlocking {
         val seen = java.util.Collections.synchronizedList(mutableListOf<AuthFailureReason>())
-        val kirora = start(KiroraOptions(trackSessions = false, onAuthenticationFailed = { seen.add(it) }))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, onAuthenticationFailed = { seen.add(it) }))
         kirora.identify(jwt("user-a"))
         fake.batchResponder = { _, _ -> FakeKiroraApiService.error(401, "UNAUTHORIZED") }
         kirora.track("E")
@@ -251,6 +252,7 @@ internal class ErrorsTest : KiroraTestBase() {
         var calls = 0
         val (base, seen) = authFailures { jwt("user-a", nonce = "${++calls}") }
         val kirora = start(KiroraOptions(
+            clientKey = "kirora_pk_test",
             trackSessions = false,
             push = com.kirora.androidsdk.model.KiroraPushOptions(),
             fetchUserToken = base.fetchUserToken,

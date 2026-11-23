@@ -67,6 +67,16 @@ internal class KiroraPushManager(
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     private val pushEnabled = pushOptions != null
+
+    /** What this device registers: Firebase's mode is the app's, fixed while it runs. */
+    private val targetKind: String by lazy {
+        val byInstallationId = try {
+            bridge?.registersByInstallationId(context) == true
+        } catch (_: Throwable) {
+            false
+        }
+        if (byInstallationId) PushTarget.FIREBASE_INSTALLATION_ID else PushTarget.FCM_TOKEN
+    }
     private val operations = Mutex()
     private val cleanups: MutableSet<Cleanup> = ConcurrentHashMap.newKeySet()
 
@@ -106,12 +116,17 @@ internal class KiroraPushManager(
 
     // ---- Registration -------------------------------------------------------------------
 
-    /** A new FCM token: kept, and registered for the signed-in user. */
-    fun onNewToken(token: String) {
-        global.setPushToken(token)
-        tokenChecked = true
+    /**
+     * A new push identifier from Firebase, of [kind] (an FCM token from `onNewToken`, an
+     * installation ID from `onRegistered`): kept, and registered for the signed-in user.
+     */
+    fun onNewToken(token: String, kind: String = PushTarget.FCM_TOKEN) {
+        global.setPushToken(token, kind)
+        checkedKinds.add(kind)
         val user = identity.user ?: return
-        scope.launch { registerLogged(user) }
+        // Off the caller's thread, where Firebase's mode is read: one of the kind this device
+        // doesn't register is only kept.
+        scope.launch { if (kind == targetKind) registerLogged(user) }
     }
 
     /** Registers in the background, logging a failure. */
@@ -170,8 +185,9 @@ internal class KiroraPushManager(
         ) return
         val app = choosePushApp(user) ?: return
         val pushAppId = app.pushAppId ?: return
-        if (app.targetKind != null && app.targetKind != FCM_TOKEN) {
-            KiroraLogger.e("Kirora's Android push app expects a ${app.targetKind}; this SDK registers an FCM token. Not registering.")
+        // A Firebase push app answers fcm_token, and takes either kind.
+        if (app.targetKind != null && app.targetKind != PushTarget.FCM_TOKEN && app.targetKind != PushTarget.FIREBASE_INSTALLATION_ID) {
+            KiroraLogger.e("Kirora's Android push app expects a ${app.targetKind}; this SDK registers through Firebase. Not registering.")
             return
         }
         if (identity.user !== user) return
@@ -179,7 +195,7 @@ internal class KiroraPushManager(
         val request = DeviceRegistrationRequest(
             pushAppId = pushAppId,
             permission = GRANTED,
-            targetKind = FCM_TOKEN,
+            targetKind = targetKind,
             target = token,
             deviceSecret = preferences.getDeviceSecret(),
             appVersion = details.appVersion,
@@ -262,9 +278,8 @@ internal class KiroraPushManager(
     private suspend fun <T> authorized(user: SignedInUser, call: suspend (authorization: String) -> Response<T>): Response<T> =
         identity.authorized(user, call) ?: throw KiroraApiError(401, "UNAUTHORIZED", "Kirora refused the user token: call identify() with a new one")
 
-    /** Whether the kept token was checked with Firebase (or just came from it) in this process. */
-    @Volatile
-    private var tokenChecked = false
+    /** The kinds whose kept identifier was checked with Firebase (or just came from it) in this process. */
+    private val checkedKinds: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
      * The token to register: the kept one, checked with Firebase once per process, since a refresh
@@ -272,11 +287,11 @@ internal class KiroraPushManager(
      * when Firebase can't answer in time.
      */
     private suspend fun currentToken(): String? {
-        val cached = global.getPushToken()
-        if (cached != null && (tokenChecked || bridge == null)) return cached
+        val cached = global.getPushToken(targetKind)
+        if (cached != null && (targetKind in checkedKinds || bridge == null)) return cached
         val fresh = if (cached == null) fetchFcmToken() else withTimeoutOrNull(TOKEN_CHECK_MS) { fetchFcmToken() }
-        if (fresh != null) tokenChecked = true
-        if (fresh != null && fresh != cached) global.setPushToken(fresh)
+        if (fresh != null) checkedKinds.add(targetKind)
+        if (fresh != null && fresh != cached) global.setPushToken(fresh, targetKind)
         return fresh ?: cached
     }
 
@@ -287,7 +302,7 @@ internal class KiroraPushManager(
             return null
         }
         return try {
-            b.fetchToken()
+            if (targetKind == PushTarget.FIREBASE_INSTALLATION_ID) b.fetchInstallationId() else b.fetchToken()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -625,7 +640,6 @@ internal class KiroraPushManager(
     companion object {
         private const val GRANTED = "granted"
         private const val DENIED = "denied"
-        private const val FCM_TOKEN = "fcm_token"
         private const val HANDLED_EXTRA = "kirora.handled"
         /** How long a registration waits for Firebase to confirm the kept token. */
         private const val TOKEN_CHECK_MS = 5_000L

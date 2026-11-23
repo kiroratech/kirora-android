@@ -27,6 +27,8 @@ jobs:
         run: ./gradlew :kirora-sdk:testDebugUnitTest :kirora-sdk-push:testDebugUnitTest
       - name: Lint
         run: ./gradlew :kirora-sdk:lintDebug :kirora-sdk-push:lintDebug
+      - name: Public API unchanged (./gradlew apiDump records an intended change)
+        run: ./gradlew :kirora-sdk:apiCheck :kirora-sdk-push:apiCheck
       - name: Release builds (SDK artifacts and R8-minified sample)
         run: ./gradlew :kirora-sdk:assembleRelease :kirora-sdk-push:assembleRelease :app:assembleRelease
       - uses: actions/upload-artifact@v7

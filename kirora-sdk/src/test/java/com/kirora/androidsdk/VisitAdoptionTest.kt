@@ -18,7 +18,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 internal class VisitAdoptionTest : KiroraTestBase() {
 
-    private val sessions = KiroraOptions(trackSessions = true)
+    private val sessions = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = true)
 
     /** A's visit, a relaunch, an event before anyone signs in, then [next] signs in: that event's context, and A's visit. */
     private fun preSignInEventAfterRelaunchAdoptedBy(next: String): Pair<JsonObject, String> = runBlocking {

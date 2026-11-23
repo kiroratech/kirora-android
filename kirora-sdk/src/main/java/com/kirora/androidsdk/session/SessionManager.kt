@@ -5,7 +5,7 @@ import android.os.Looper
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
+import com.kirora.androidsdk.utils.AppLifecycle
 import com.kirora.androidsdk.utils.KiroraLogger
 import com.kirora.androidsdk.utils.KiroraPreferences
 import java.util.UUID
@@ -31,7 +31,12 @@ internal class SessionManager(
     private val onAppOpen: () -> Unit = {},
     private val isTrackingAllowed: () -> Boolean = { true },
     private val clock: () -> Long = System::currentTimeMillis,
-    private val processLifecycle: () -> Lifecycle = { ProcessLifecycleOwner.get().lifecycle }
+    private val processLifecycle: () -> Lifecycle = { AppLifecycle.get() },
+    /**
+     * Runs a lifecycle change once start-up has read the stored consent and visit: at once when it
+     * has, otherwise in turn with the events tracked before it, off the main thread.
+     */
+    private val whenStartedUp: (() -> Unit) -> Unit = { it() }
 ) : DefaultLifecycleObserver {
 
     @Volatile
@@ -56,6 +61,9 @@ internal class SessionManager(
 
     @Volatile
     private var ready = false
+
+    /** The stored visit has been read: [onActivity] touches only memory. */
+    val isReady: Boolean get() = ready
 
     /**
      * Reads the stored visit (continuing it or starting one) and the app version, once. Done off
@@ -95,25 +103,64 @@ internal class SessionManager(
     private fun beginTracking() {
         if (!isTrackingAllowed()) return
         if (trackSessions) restoreOrStart()
-        if (trackAppLifecycle) checkAppInstallOrUpdate()
+        checkLifecycleOnce()
     }
 
     /** Consent arrived after start: tracking starts from now; nothing skipped before is made up. */
     fun onConsentGranted() {
-        if (trackSessions) onActivity()
-        if (trackAppLifecycle) checkAppInstallOrUpdate()
+        onActivity()
+    }
+
+    /** True on this thread while `Session Started` is being tracked. */
+    private val startingVisit = ThreadLocal<Boolean>()
+
+    /** The install or update check ran in this process, with tracking allowed. */
+    @Volatile
+    private var lifecycleChecked = false
+
+    /**
+     * `Application Installed` or `Updated`, once per process, at the first moment tracking is
+     * allowed: at start, or later when consent is granted or becomes readable (storage locked
+     * until the device's first unlock, say).
+     */
+    @Synchronized
+    private fun checkLifecycleOnce() {
+        if (!trackAppLifecycle || lifecycleChecked) return
+        // Set first: the event it tracks comes back here, through onActivity.
+        lifecycleChecked = true
+        checkAppInstallOrUpdate()
     }
 
     fun stop() {
-        stopped = true
-        runOnMain { processLifecycle().removeObserver(this) }
+        // A start still waiting for start-up won't be processed now: handed back, so the client
+        // that replaces this one counts it instead of taking it for a replay.
+        val unprocessed = synchronized(this) {
+            stopped = true
+            pendingStart.also { pendingStart = null }
+        }
+        runOnMain {
+            if (unprocessed != null) {
+                foregroundCounted = false
+                processStarted = unprocessed
+            }
+            processLifecycle().removeObserver(this)
+        }
     }
+
+    /** A counted start whose processing waits for start-up: the process flag as it was before it; null for none. */
+    private var pendingStart: Boolean? = null
 
     /** Called for every tracked event, before it is captured. */
     @Synchronized
     fun onActivity() {
         ensureBegun()
-        if (!trackSessions || !isTrackingAllowed()) return
+        if (!isTrackingAllowed()) return
+        if (trackSessions) continueOrBeginVisit()
+        // After the visit, so `Session Started` comes first: not from within its own capture.
+        if (!lifecycleChecked && startingVisit.get() != true) checkLifecycleOnce()
+    }
+
+    private fun continueOrBeginVisit() {
         val now = clock()
         val current = owner()
         val ownerChanged = current != null && sessionOwner != null && current != sessionOwner
@@ -131,7 +178,8 @@ internal class SessionManager(
 
     /** Forgets the visit; the next activity begins a new one. For a sign-out, a user change or a consent withdrawal. */
     @Synchronized
-    fun reset() {
+    fun reset(onlyIf: () -> Boolean = { true }) {
+        if (!onlyIf()) return
         sessionId = null
         sessionOwner = null
         lastActivity = 0L
@@ -168,7 +216,12 @@ internal class SessionManager(
         preferences.setSessionId(newSessionId)
         preferences.setSessionOwner(newOwner)
         touch(clock(), persist = true)
-        trackEvent("Session Started", null)
+        startingVisit.set(true)
+        try {
+            trackEvent("Session Started", null)
+        } finally {
+            startingVisit.set(false)
+        }
         KiroraLogger.d("Started new session.")
     }
 
@@ -219,46 +272,64 @@ internal class SessionManager(
 
     override fun onStart(owner: LifecycleOwner) {
         if (stopped) return
-        val fromBackground = try {
-            countStart()
+        // The process-wide counts are the main thread's, so they're settled here, at once, even
+        // when the rest waits for start-up. A replacement client (a hot reload, say) hears the
+        // same launch replayed: not another open. The first start of this process is a cold
+        // launch; any later one is a return from the background.
+        val fromBackground = if (skipReplayedStart) {
+            null
+        } else {
+            foregroundCounted = true
+            processStarted.also { processStarted = true }
+        }
+        if (fromBackground != null) synchronized(this) { pendingStart = fromBackground }
+        whenStartedUp { started(fromBackground) }
+    }
+
+    /** [fromBackground]: null for a replayed start, which counts nothing. */
+    private fun started(fromBackground: Boolean?) {
+        synchronized(this) {
+            if (stopped) return
+            pendingStart = null
+        }
+        val counted = try {
+            fromBackground?.takeIf { countStart() }
         } finally {
             foreground = true
         }
-        if (fromBackground != null && trackAppLifecycle) {
+        if (counted != null && trackAppLifecycle) {
             trackEvent(
                 "Application Opened",
-                mapOf("from_background" to fromBackground, "version" to appVersion, "build" to appBuild)
+                mapOf("from_background" to counted, "version" to appVersion, "build" to appBuild)
             )
         }
     }
 
     /**
-     * Counts a start as an app open and activity, answering whether it was a return from the
-     * background; null for one not to report. Runs while the app still counts as in the
-     * background, so a visit that ran out while the app was away ends.
+     * Counts a start as an app open and activity; false when tracking isn't allowed. Runs while
+     * the app still counts as in the background, so a visit that ran out while the app was away ends.
      */
-    private fun countStart(): Boolean? {
-        // A replacement client (a hot reload, say): the same launch, not another open.
-        if (skipReplayedStart) return null
-        foregroundCounted = true
-        // The first start of this process is a cold launch; any later one is a return from the background.
-        val fromBackground = processStarted
-        processStarted = true
+    private fun countStart(): Boolean {
         onForeground()
-        if (!isTrackingAllowed()) return null
+        if (!isTrackingAllowed()) return false
         onAppOpen()
         // Returning to the foreground is activity: it keeps the visit or begins one.
         onActivity()
-        return fromBackground
+        return true
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        val leftAt = clock()
+        whenStartedUp { stopped(leftAt) }
+    }
+
+    private fun stopped(leftAt: Long) {
         if (stopped) return
         foreground = false
         if (isTrackingAllowed()) {
             synchronized(this) {
                 // The 30 minutes count from the moment the app leaves the foreground.
-                if (sessionId != null) touch(clock(), persist = true)
+                if (sessionId != null) touch(leftAt, persist = true)
             }
             if (trackAppLifecycle) trackEvent("Application Backgrounded", null)
         }

@@ -144,7 +144,7 @@ internal class DeliveryConformanceTest : KiroraTestBase() {
 
     @Test
     fun beforeSendRedactsBeforeStorageAndCanDrop() = runBlocking {
-        val kirora = signedIn(KiroraOptions(trackSessions = false, beforeSend = { event ->
+        val kirora = signedIn(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, beforeSend = { event ->
             when (event.name) {
                 "Drop" -> null
                 "Throw" -> throw IllegalStateException("boom")

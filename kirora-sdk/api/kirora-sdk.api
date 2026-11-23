@@ -1,0 +1,225 @@
+public final class com/kirora/androidsdk/Kirora {
+	public static final field Companion Lcom/kirora/androidsdk/Kirora$Companion;
+	public fun <init> (Landroid/content/Context;Lcom/kirora/androidsdk/model/KiroraOptions;)V
+	public final fun addForegroundNotificationListener (Lkotlin/jvm/functions/Function1;)V
+	public final fun addNotificationClickListener (Lkotlin/jvm/functions/Function1;)V
+	public final fun awaitReady (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun clearQueue ()V
+	public final fun destroy ()V
+	public final fun flush (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun flushAsync ()V
+	public final fun flushAsync (Lkotlin/jvm/functions/Function0;)V
+	public static synthetic fun flushAsync$default (Lcom/kirora/androidsdk/Kirora;Lkotlin/jvm/functions/Function0;ILjava/lang/Object;)V
+	public final fun getDeviceId ()Ljava/lang/String;
+	public final fun getOptions ()Lcom/kirora/androidsdk/model/KiroraOptions;
+	public final fun getPushConsent ()Z
+	public final fun getPushStatus (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun getPushStatusAsync (Lkotlin/jvm/functions/Function1;)V
+	public final fun getPushToken ()Ljava/lang/String;
+	public final fun getQueuedEventCountFlow ()Lkotlinx/coroutines/flow/Flow;
+	public final fun getSessionId ()Ljava/lang/String;
+	public final fun getState (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun getStateAsync (Lkotlin/jvm/functions/Function1;)V
+	public final fun getTrackingConsent ()Z
+	public static final fun handleNewPushToken (Landroid/content/Context;Ljava/lang/String;)V
+	public final fun handleNotificationIntent (Landroid/content/Intent;)Z
+	public static final fun handlePushMessage (Landroid/content/Context;Ljava/util/Map;)Z
+	public static final fun handlePushRegistered (Landroid/content/Context;Ljava/lang/String;)V
+	public final fun identify (Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static synthetic fun identify$default (Lcom/kirora/androidsdk/Kirora;Ljava/lang/String;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
+	public final fun identifyAsync ()V
+	public final fun identifyAsync (Ljava/lang/String;)V
+	public final fun identifyAsync (Ljava/lang/String;Lkotlin/jvm/functions/Function1;)V
+	public static synthetic fun identifyAsync$default (Lcom/kirora/androidsdk/Kirora;Ljava/lang/String;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)V
+	public static final fun installPushIntegration (Landroid/content/Context;)V
+	public final fun isIdentified ()Z
+	public final fun isInitialized ()Z
+	public final fun isKiroraPush (Ljava/util/Map;)Z
+	public final fun isReady ()Z
+	public final fun logout (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun logoutAsync ()V
+	public final fun logoutAsync (Lkotlin/jvm/functions/Function0;)V
+	public static synthetic fun logoutAsync$default (Lcom/kirora/androidsdk/Kirora;Lkotlin/jvm/functions/Function0;ILjava/lang/Object;)V
+	public final fun onNewPushToken (Ljava/lang/String;)V
+	public final fun onPushMessageReceived (Ljava/util/Map;)Z
+	public final fun onPushRegistered (Ljava/lang/String;)V
+	public final fun removeForegroundNotificationListener (Lkotlin/jvm/functions/Function1;)V
+	public final fun removeNotificationClickListener (Lkotlin/jvm/functions/Function1;)V
+	public final fun requestPushPermission (Landroid/content/Context;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun requestPushPermission (Landroid/content/Context;Lkotlin/jvm/functions/Function1;)V
+	public static final fun setForegroundNotificationHandler (Lkotlin/jvm/functions/Function1;)V
+	public final fun setPushConsent (ZLkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun setPushConsentAsync (Z)V
+	public final fun setPushConsentAsync (ZLkotlin/jvm/functions/Function1;)V
+	public static synthetic fun setPushConsentAsync$default (Lcom/kirora/androidsdk/Kirora;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)V
+	public final fun setPushEnabled (ZLkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun setPushEnabledAsync (Z)V
+	public final fun setPushEnabledAsync (ZLkotlin/jvm/functions/Function0;)V
+	public static synthetic fun setPushEnabledAsync$default (Lcom/kirora/androidsdk/Kirora;ZLkotlin/jvm/functions/Function0;ILjava/lang/Object;)V
+	public final fun setTrackingConsent (Z)V
+	public static final fun setWrapperCallbacks (Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function2;)V
+	public static final fun setWrapperSdk (Ljava/lang/String;Ljava/lang/String;)Z
+	public final fun track (Ljava/lang/String;)V
+	public final fun track (Ljava/lang/String;Ljava/util/Map;)V
+	public static synthetic fun track$default (Lcom/kirora/androidsdk/Kirora;Ljava/lang/String;Ljava/util/Map;ILjava/lang/Object;)V
+	public final fun trackScreenView (Ljava/lang/String;)V
+	public static final fun wrapperDetached ()V
+}
+
+public final class com/kirora/androidsdk/Kirora$Companion {
+	public final fun getActive ()Lcom/kirora/androidsdk/Kirora;
+	public final fun handleNewPushToken (Landroid/content/Context;Ljava/lang/String;)V
+	public final fun handlePushMessage (Landroid/content/Context;Ljava/util/Map;)Z
+	public final fun handlePushRegistered (Landroid/content/Context;Ljava/lang/String;)V
+	public final fun installPushIntegration (Landroid/content/Context;)V
+	public final fun isKiroraPush (Ljava/util/Map;)Z
+	public final fun setForegroundNotificationHandler (Lkotlin/jvm/functions/Function1;)V
+	public final fun setWrapperCallbacks (Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function2;)V
+	public final fun setWrapperSdk (Ljava/lang/String;Ljava/lang/String;)Z
+	public final fun wrapperDetached ()V
+}
+
+public abstract interface annotation class com/kirora/androidsdk/KiroraInternalApi : java/lang/annotation/Annotation {
+}
+
+public final class com/kirora/androidsdk/model/AuthFailureReason : java/lang/Enum {
+	public static final field FETCH_FAILED Lcom/kirora/androidsdk/model/AuthFailureReason;
+	public static final field REFUSED Lcom/kirora/androidsdk/model/AuthFailureReason;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lcom/kirora/androidsdk/model/AuthFailureReason;
+	public static fun values ()[Lcom/kirora/androidsdk/model/AuthFailureReason;
+}
+
+public final class com/kirora/androidsdk/model/BeforeSendEvent {
+	public fun <init> (Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;)V
+	public final fun copy ()Lcom/kirora/androidsdk/model/BeforeSendEvent;
+	public final fun copy (Ljava/util/Map;)Lcom/kirora/androidsdk/model/BeforeSendEvent;
+	public final fun copy (Ljava/util/Map;Ljava/util/Map;)Lcom/kirora/androidsdk/model/BeforeSendEvent;
+	public static synthetic fun copy$default (Lcom/kirora/androidsdk/model/BeforeSendEvent;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)Lcom/kirora/androidsdk/model/BeforeSendEvent;
+	public final fun getContext ()Ljava/util/Map;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getProperties ()Ljava/util/Map;
+}
+
+public final class com/kirora/androidsdk/model/KiroraApiError : com/kirora/androidsdk/model/KiroraError {
+	public fun <init> (ILjava/lang/String;Ljava/lang/String;Ljava/lang/Long;)V
+	public synthetic fun <init> (ILjava/lang/String;Ljava/lang/String;Ljava/lang/Long;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getCode ()Ljava/lang/String;
+	public final fun getRetryAfterMs ()Ljava/lang/Long;
+	public final fun getRetryable ()Z
+	public final fun getStatus ()I
+}
+
+public class com/kirora/androidsdk/model/KiroraError : java/lang/Exception {
+	public fun <init> (Ljava/lang/String;Ljava/lang/Throwable;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/Throwable;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+}
+
+public final class com/kirora/androidsdk/model/KiroraOptions {
+	public fun <init> (Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;Z)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;ZZ)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;ZZZ)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;ZZZLcom/kirora/androidsdk/model/LogLevel;)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;ZZZLcom/kirora/androidsdk/model/LogLevel;Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;ZZZLcom/kirora/androidsdk/model/LogLevel;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;ZZZLcom/kirora/androidsdk/model/LogLevel;Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;)V
+	public fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;ZZZLcom/kirora/androidsdk/model/LogLevel;Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;)V
+	public synthetic fun <init> (Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lcom/kirora/androidsdk/model/KiroraPushOptions;ZZZLcom/kirora/androidsdk/model/LogLevel;Ljava/lang/String;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getApiUrl ()Ljava/lang/String;
+	public final fun getBeforeSend ()Lkotlin/jvm/functions/Function1;
+	public final fun getClientKey ()Ljava/lang/String;
+	public final fun getFetchUserToken ()Lkotlin/jvm/functions/Function1;
+	public final fun getHandleDeepLink ()Lkotlin/jvm/functions/Function1;
+	public final fun getLogLevel ()Lcom/kirora/androidsdk/model/LogLevel;
+	public final fun getOnAuthenticationFailed ()Lkotlin/jvm/functions/Function1;
+	public final fun getPush ()Lcom/kirora/androidsdk/model/KiroraPushOptions;
+	public final fun getRequireTrackingConsent ()Z
+	public final fun getTrackAppLifecycle ()Z
+	public final fun getTrackSessions ()Z
+}
+
+public final class com/kirora/androidsdk/model/KiroraPushOptions {
+	public fun <init> ()V
+	public fun <init> (Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/Integer;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/Integer;Ljava/lang/Integer;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/String;Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function1;Ljava/util/Set;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function1;Ljava/util/Set;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getAccentColor ()Ljava/lang/Integer;
+	public final fun getAllowedLinkSchemes ()Ljava/util/Set;
+	public final fun getDefaultChannelId ()Ljava/lang/String;
+	public final fun getDefaultChannelName ()Ljava/lang/String;
+	public final fun getOnForegroundNotification ()Lkotlin/jvm/functions/Function1;
+	public final fun getPushAppId ()Ljava/lang/String;
+	public final fun getSmallIconResId ()Ljava/lang/Integer;
+}
+
+public final class com/kirora/androidsdk/model/KiroraState {
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getDeviceId ()Ljava/lang/String;
+	public final fun getPushConsent ()Z
+	public final fun getPushToken ()Ljava/lang/String;
+	public final fun getQueuedEventCount ()I
+	public final fun getSessionId ()Ljava/lang/String;
+	public final fun getTrackingConsent ()Z
+	public fun hashCode ()I
+	public final fun isIdentified ()Z
+	public final fun isInitialized ()Z
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/kirora/androidsdk/model/LogLevel : java/lang/Enum {
+	public static final field DEBUG Lcom/kirora/androidsdk/model/LogLevel;
+	public static final field ERROR Lcom/kirora/androidsdk/model/LogLevel;
+	public static final field NONE Lcom/kirora/androidsdk/model/LogLevel;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lcom/kirora/androidsdk/model/LogLevel;
+	public static fun values ()[Lcom/kirora/androidsdk/model/LogLevel;
+}
+
+public final class com/kirora/androidsdk/model/PushPermission : java/lang/Enum {
+	public static final field DENIED Lcom/kirora/androidsdk/model/PushPermission;
+	public static final field GRANTED Lcom/kirora/androidsdk/model/PushPermission;
+	public static final field UNANSWERED Lcom/kirora/androidsdk/model/PushPermission;
+	public static final field UNSUPPORTED Lcom/kirora/androidsdk/model/PushPermission;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getWireValue ()Ljava/lang/String;
+	public static fun valueOf (Ljava/lang/String;)Lcom/kirora/androidsdk/model/PushPermission;
+	public static fun values ()[Lcom/kirora/androidsdk/model/PushPermission;
+}
+
+public final class com/kirora/androidsdk/model/PushStatus : java/lang/Enum {
+	public static final field DENIED Lcom/kirora/androidsdk/model/PushStatus;
+	public static final field DISABLED Lcom/kirora/androidsdk/model/PushStatus;
+	public static final field ENABLED Lcom/kirora/androidsdk/model/PushStatus;
+	public static final field UNANSWERED Lcom/kirora/androidsdk/model/PushStatus;
+	public static final field UNSUPPORTED Lcom/kirora/androidsdk/model/PushStatus;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getWireValue ()Ljava/lang/String;
+	public static fun valueOf (Ljava/lang/String;)Lcom/kirora/androidsdk/model/PushStatus;
+	public static fun values ()[Lcom/kirora/androidsdk/model/PushStatus;
+}
+
+public final class com/kirora/androidsdk/model/UserTokenError : com/kirora/androidsdk/model/KiroraError {
+	public fun <init> (Ljava/lang/String;Ljava/lang/Throwable;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/Throwable;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+}
+
+public abstract interface class com/kirora/androidsdk/push/KiroraPushBridge {
+	public fun fetchInstallationId (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public abstract fun fetchToken (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public fun registersByInstallationId (Landroid/content/Context;)Z
+	public abstract fun requestNotificationPermission (Landroid/content/Context;Lkotlin/jvm/functions/Function1;)V
+}
+
+public final class com/kirora/androidsdk/push/KiroraPushBridge$DefaultImpls {
+	public static fun fetchInstallationId (Lcom/kirora/androidsdk/push/KiroraPushBridge;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static fun registersByInstallationId (Lcom/kirora/androidsdk/push/KiroraPushBridge;Landroid/content/Context;)Z
+}
+

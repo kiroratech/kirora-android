@@ -17,7 +17,7 @@ import retrofit2.Response
 @Config(sdk = [34])
 internal class DeviceSecretTest : KiroraTestBase() {
     private val token = jwt("user-a")
-    private val push = KiroraOptions(trackSessions = false, push = KiroraPushOptions())
+    private val push = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions())
     /** The secret the installation sent with its first registration. */
     private val secret: String
         get() = fake.deviceRegistrations.first().second.deviceSecret!!

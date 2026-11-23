@@ -6,7 +6,6 @@ import android.os.SystemClock
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import com.google.gson.JsonObject
 import com.kirora.androidsdk.db.EventEntity
 import com.kirora.androidsdk.db.KiroraDatabase
@@ -16,6 +15,7 @@ import com.kirora.androidsdk.model.AuthFailureReason
 import com.kirora.androidsdk.model.BeforeSendEvent
 import com.kirora.androidsdk.model.EventDropReason
 import com.kirora.androidsdk.model.KiroraApiError
+import com.kirora.androidsdk.model.KiroraContext
 import com.kirora.androidsdk.model.KiroraError
 import com.kirora.androidsdk.model.KiroraOptions
 import com.kirora.androidsdk.model.KiroraState
@@ -29,6 +29,7 @@ import com.kirora.androidsdk.net.KiroraAppOpenReporter
 import com.kirora.androidsdk.net.KiroraBatchManager
 import com.kirora.androidsdk.net.KiroraNetworkMonitor
 import com.kirora.androidsdk.net.PendingPurges
+import com.kirora.androidsdk.net.ServerHold
 import com.kirora.androidsdk.net.models.PushConsentRequest
 import com.kirora.androidsdk.push.KiroraPushBridge
 import com.kirora.androidsdk.push.KiroraPushDisplay
@@ -37,7 +38,9 @@ import com.kirora.androidsdk.push.KiroraPushTracker
 import com.kirora.androidsdk.push.KiroraPushTrampolineActivity
 import com.kirora.androidsdk.push.PushDisplayConfig
 import com.kirora.androidsdk.push.PushListeners
+import com.kirora.androidsdk.push.PushTarget
 import com.kirora.androidsdk.session.SessionManager
+import com.kirora.androidsdk.utils.AppLifecycle
 import com.kirora.androidsdk.utils.GlobalPreferences
 import com.kirora.androidsdk.utils.JsonSnapshot
 import com.kirora.androidsdk.utils.KiroraContextProvider
@@ -51,6 +54,7 @@ import com.kirora.androidsdk.utils.toApiError
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellationException
@@ -108,7 +112,7 @@ public class Kirora internal constructor(
     private var setupError: String? = null
 
     @Volatile
-    public var options: KiroraOptions = KiroraOptions()
+    public var options: KiroraOptions = KiroraOptions(clientKey = "")
         private set
 
     @Volatile
@@ -181,6 +185,23 @@ public class Kirora internal constructor(
 
     /** Guards the first read of the tracking choice. Declared before init, which may need it. */
     private val consentReadLock = Any()
+    /** Counts tracking answers given while running: start-up's clean-up stands down for a newer one. */
+    private val consentAnswers = AtomicInteger()
+
+    /** Whether tracking was allowed just before each answer: early events tracked before it keep that. */
+    private val allowedBeforeAnswer = ConcurrentHashMap<Int, Boolean>()
+
+    /** Set on the queue's thread during [captureOnQueue]: the writes it gives rise to, in order. Before `init`, which may use it. */
+    private val nestedWrites = ThreadLocal<MutableList<suspend (locked: Boolean) -> Unit>?>()
+
+    /** The moment of the call being captured on the queue's thread, or null for now. Before `init`, which may use it. */
+    private val callMoment = ThreadLocal<CallMoment?>()
+
+    /**
+     * Changes to the visit (events, lifecycle changes, resets) handed to the queue because start-up
+     * hadn't read storage yet, and not yet run: while any wait, the next ones follow them.
+     */
+    private val visitChangesWaiting = AtomicInteger()
 
     // ---- Early token refresh ---------------------------------------------------------------
 
@@ -341,7 +362,8 @@ public class Kirora internal constructor(
         preferences = prefs
         val globalPrefs = GlobalPreferences(app)
         global = globalPrefs
-        val provider = KiroraContextProvider(app, prefs)
+        AppLifecycle.install(app)
+        val provider = KiroraContextProvider(app, prefs, ::consentAllowsTracking)
         contextProvider = provider
         val db = lazy {
             try {
@@ -374,6 +396,7 @@ public class Kirora internal constructor(
             onTokenRefused = ::onTokenRefused,
             onDropped = ::reportDropped,
             onAuthFailure = ::reportAuthFailure,
+            serverHold = ServerHold.stored(prefs, "events"),
             clock = environment.clock
         )
         batchManager = batchMgr
@@ -419,13 +442,14 @@ public class Kirora internal constructor(
             appVersion = appInfo.version.ifBlank { "unknown" },
             appBuild = appInfo.build.ifBlank { "unknown" },
             trackEvent = { name, properties -> track(name, properties) },
-            owner = { identity.user?.subject },
+            owner = ::currentOwner,
             onBackground = { scope.launch { runFlush() } },
             onForeground = ::checkTokenExpiry,
-            onAppOpen = opens::onAppOpen,
+            onAppOpen = { opens.onAppOpen(currentUser()) },
             isTrackingAllowed = ::trackingAllowed,
             clock = environment.clock,
-            processLifecycle = { processLifecycle() }
+            processLifecycle = { processLifecycle() },
+            whenStartedUp = ::inVisitOrder
         )
 
         val apiUrl = this.options.apiUrl
@@ -444,9 +468,12 @@ public class Kirora internal constructor(
         scope.launch {
             try {
                 ensureConsentRead()
-                // What's stored from before the user refused, e.g. before consent was required.
-                if (consentRefused()) forgetTracking()
-                sessionManager?.ensureBegun()
+                // What's stored from before the user refused, e.g. before consent was required. A
+                // grant meanwhile keeps whatever it allowed: each step checks there was none.
+                val answers = consentAnswers.get()
+                if (consentRefused()) forgetTracking { consentAnswers.get() == answers }
+                // On the queue, in turn with events tracked before it: its `Session Started` comes first.
+                withContext(queueWork) { captureOnQueue { sessionManager?.ensureBegun() } }
                 if (pushOptions != null) {
                     // Kept on the device so a push can be drawn, and a tap reported, before the app sets Kirora up.
                     val display = PushDisplayConfig.of(pushOptions)
@@ -551,8 +578,10 @@ public class Kirora internal constructor(
             if (previous != null && previous.subject != user.subject) preferences?.clearUserData()
             // Also after a restart: a choice recorded for anyone else is theirs, not this user's.
             preferences?.forgetRecordedPushConsentUnlessOf(user.subject)
-            val sessionOwner = sessionManager?.currentOwner
-            if (sessionOwner != null && sessionOwner != user.subject) sessionManager?.reset()
+            inVisitOrder {
+                val sessionOwner = sessionManager?.currentOwner
+                if (sessionOwner != null && sessionOwner != user.subject) sessionManager?.reset()
+            }
         }
         scheduleTokenRefresh(user)
         val queue = store
@@ -701,7 +730,7 @@ public class Kirora internal constructor(
         refreshJob = null
         foregroundRefresh?.cancel()
         foregroundRefresh = null
-        sessionManager?.reset()
+        inVisitOrder { sessionManager?.reset() }
         preferences?.clearUserData()
     }
 
@@ -719,7 +748,7 @@ public class Kirora internal constructor(
             appOpens?.clearOwnedBy(user.subject)
         }
         // Kept past a consent withdrawal only so the device could be detached.
-        if (consentRefused()) forgetDeviceIdIfUnused()
+        if (consentRefused()) forgetDeviceIdIfUnused { consentRefused() }
     }
 
     // ---- Background authentication failures --------------------------------------------------
@@ -834,81 +863,210 @@ public class Kirora internal constructor(
     private fun trackInternal(name: String, properties: Map<String, Any?>?) {
         val queue = store
         val provider = contextProvider
-        if (!isInitialized || destroyed || queue == null || provider == null) {
+        // Captured on the queue for a call made before destroy(): still that call's event.
+        if (((!isInitialized || destroyed) && callMoment.get() == null) || queue == null || provider == null) {
             KiroraLogger.w("Kirora.track called on a disabled instance; not tracked.")
             return
         }
-        if (!trackingAllowed()) return
-        if (name.isBlank()) {
-            KiroraLogger.e("Not tracked: an event needs a name")
-            reportDropped(1, EventDropReason.INVALID)
-            return
-        }
+        val waits = mustWaitForStartUp()
+        // Refused tracking costs nothing: not even the copy (known at once unless start-up is still reading).
+        if (!waits && !trackingAllowed()) return
         // Copied now, so changing the map after track() doesn't change the event.
-        val snapshot = try {
+        val snapshot: JsonObject? = if (name.isBlank()) null else try {
             JsonSnapshot.of(properties)
         } catch (e: NotJsonError) {
             KiroraLogger.e("$name not tracked: its properties hold ${e.message}")
-            reportDropped(1, EventDropReason.INVALID)
+            null
+        }
+        val occurredAt = environment.clock()
+        // Decided now: whoever signs in or out later, this event stays this user's.
+        val owner = currentOwner()
+
+        // Until start-up has read the stored consent and visit, reading them here would touch the
+        // disk on the caller's thread, often the main one: the queue reads them, still in call order.
+        if (waits) {
+            // The device's language, time zone and screen as they are now, not when the queue gets to it.
+            val surroundings = provider.surroundings()
+            inVisitOrder {
+                when {
+                    !trackingAllowed() -> Unit
+                    snapshot == null -> invalid(name)
+                    else -> {
+                        val pending = Pending(snapshot, occurredAt, owner, capture(provider, owner, surroundings))
+                        // After whatever the capture tracked itself (`Session Started`, say).
+                        launchWrite { held -> writeEvent(name, held) { pending } }
+                    }
+                }
+            }
             return
         }
-        // Activity first: it may begin a visit with `Session Started`, queued ahead of this event.
-        sessionManager?.onActivity()
-        val occurredAt = environment.clock()
-        val sessionId = sessionManager?.sessionId
-        // Decided now: whoever signs in or out later, this event stays this user's.
-        val owner = identity.user?.subject
-        // Before sign-in, whose visit it continues: adoption by anyone else drops its sessionId.
-        val visitOwner = if (owner == null && sessionId != null) sessionManager?.currentOwner else null
-        // Captured with the event, not when the queue gets to it.
-        val capturedContext = provider.getContext(sessionId)
-
+        if (snapshot == null) {
+            invalid(name)
+            return
+        }
+        val captured = capture(provider, owner, provider.surroundings())
         // Not on this client's scope: destroy() must not cancel an event tracked before it, which
         // waits in the database for the next client. (With no database, only in memory, it is
         // this client's and goes with it, like the rest of its memory queue.)
         // On the queue's thread, in call order; only the store write takes the queue's lock, so the
         // next event's JSON is built while this one's waits on Room, and still lands after it.
-        queueWrites.launch(queueWork) {
-            try {
+        launchWrite { locked ->
+            writeEvent(name, locked) {
                 // Consent withdrawn while this was waiting. A destroy() meanwhile doesn't drop it:
                 // it waits on the device for the next client. (A withdrawal through that client
                 // forgets queued events on this same queue, after this write.)
-                if (!consentAllowsTracking()) return@launch
-                var context = capturedContext.toJson(provider.app)
-                var props = snapshot
-                options.beforeSend?.let { hook ->
-                    val redacted = redact(hook, name, props, context) ?: return@launch
-                    props = redacted.first
-                    context = redacted.second
-                }
-                val propertiesJson = props.toString()
-                val contextJson = context.toString()
-                val size = JsonSnapshot.utf8Length(name) + JsonSnapshot.utf8Length(propertiesJson) +
-                    JsonSnapshot.utf8Length(contextJson) + JsonSnapshot.utf8Length(owner ?: "") + EVENT_OVERHEAD_BYTES
-                if (size > EventStore.MAX_BYTES) {
-                    KiroraLogger.e("$name not tracked: larger than the event queue")
-                    reportDropped(1, EventDropReason.INVALID)
-                    return@launch
-                }
-                val entity = EventEntity(
-                    idempotencyKey = UUID.randomUUID().toString(),
-                    name = name,
-                    propertiesJson = propertiesJson,
-                    contextJson = contextJson,
-                    occurredAt = occurredAt,
-                    owner = owner,
-                    visitOwner = visitOwner,
-                    sizeBytes = size
-                )
-                queueOrder.withLock {
-                    reportDropped(queue.add(entity), EventDropReason.QUEUE_FULL)
-                    batchManager?.onEventQueued()
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                KiroraLogger.e("$name not tracked: it could not be queued", e)
+                if (!consentAllowsTracking()) null else Pending(snapshot, occurredAt, owner, captured)
             }
+        }
+    }
+
+    /**
+     * Runs [capture] on the queue's thread, holding the queue's lock ([locked]: already held), then
+     * stores what it tracked (`Session Started`, an install, the event itself) before letting go:
+     * they land in the order they were captured, and before a sign-in or sign-out called later.
+     */
+    private suspend fun captureOnQueue(locked: Boolean = false, moment: CallMoment? = null, capture: () -> Unit) {
+        if (!locked) return queueOrder.withLock { captureOnQueue(locked = true, moment, capture) }
+        val nested = mutableListOf<suspend (locked: Boolean) -> Unit>()
+        val outer = callMoment.get()
+        try {
+            nestedWrites.set(nested)
+            // Judged as at the call: the consent and the user of that moment, not of now.
+            if (moment != null) callMoment.set(moment)
+            capture()
+        } catch (e: Exception) {
+            KiroraLogger.e("Could not capture an event", e)
+        } finally {
+            nestedWrites.remove()
+            callMoment.set(outer)
+        }
+        nested.forEach { it(true) }
+    }
+
+    /** When a call was made: how many tracking answers had been given, and who was signed in. */
+    private class CallMoment(val answers: Int, val user: SignedInUser?)
+
+    private fun moment(): CallMoment = callMoment.get() ?: CallMoment(consentAnswers.get(), identity.user)
+
+    /** Who is signed in, as of the call being captured. */
+    private fun currentUser(): SignedInUser? = callMoment.get().let { if (it != null) it.user else identity.user }
+
+    private fun currentOwner(): String? = currentUser()?.subject
+
+    /** Start-up hasn't read storage yet, or changes queued for it haven't run: this one follows them. */
+    private fun mustWaitForStartUp(): Boolean =
+        nestedWrites.get() == null && !(startupReadsDone() && visitChangesWaiting.get() == 0)
+
+    /**
+     * Runs a change to the visit now, or, while [mustWaitForStartUp], on the queue in call order,
+     * judged by the moment of the call (its consent and its user).
+     */
+    private fun inVisitOrder(change: () -> Unit) {
+        if (!mustWaitForStartUp()) return change()
+        visitChangesWaiting.incrementAndGet()
+        val moment = moment()
+        queueWrites.launch(queueWork) {
+            try {
+                captureOnQueue(moment = moment, capture = change)
+            } finally {
+                // None waiting: no captured call refers to an answer given before now (read
+                // first: a call queued from here on captures at least this many).
+                val answers = consentAnswers.get()
+                if (visitChangesWaiting.decrementAndGet() == 0) allowedBeforeAnswer.keys.removeIf { it <= answers }
+            }
+        }
+    }
+
+    /**
+     * Stores an event on the queue, in call order; during [captureOnQueue], right after the
+     * capture, under the lock it holds ([write]'s `locked`).
+     */
+    private fun launchWrite(write: suspend (locked: Boolean) -> Unit) {
+        nestedWrites.get()?.let {
+            it.add(write)
+            return
+        }
+        queueWrites.launch(queueWork) { write(false) }
+    }
+
+    /**
+     * Tracking was allowed when the call was made, [answersAtCall] answers in, and still is: a
+     * grant given after an early call doesn't reach back to it.
+     */
+    private fun allowedSince(answersAtCall: Int): Boolean {
+        val next = answersAtCall + 1
+        if (consentAnswers.get() >= next && allowedBeforeAnswer[next] != true) return false
+        return consentAllowsTracking()
+    }
+
+    /** What the event takes from the moment it is tracked. */
+    private class Captured(val sessionId: String?, val visitOwner: String?, val context: KiroraContext)
+
+    private class Pending(val properties: JsonObject, val occurredAt: Long, val owner: String?, val captured: Captured)
+
+    /** Start-up has read consent and the visit, so tracking reads only memory. */
+    private fun startupReadsDone(): Boolean {
+        val known = consent ?: return false
+        val consentCached = known.fullyRead || environment.clock() - consentReadAt < CONSENT_REREAD_MS
+        return consentCached && sessionManager?.isReady != false
+    }
+
+    private fun invalid(name: String) {
+        if (name.isBlank()) KiroraLogger.e("Not tracked: an event needs a name")
+        reportDropped(1, EventDropReason.INVALID)
+    }
+
+    private fun capture(provider: KiroraContextProvider, owner: String?, surroundings: KiroraContextProvider.Surroundings): Captured {
+        // Activity first: it may begin a visit with `Session Started`, queued ahead of this event.
+        sessionManager?.onActivity()
+        val sessionId = sessionManager?.sessionId
+        // Before sign-in, whose visit it continues: adoption by anyone else drops its sessionId.
+        val visitOwner = if (owner == null && sessionId != null) sessionManager?.currentOwner else null
+        return Captured(sessionId, visitOwner, provider.getContext(sessionId, surroundings))
+    }
+
+    /** Builds and stores the event [prepare] gives, on the queue; null leaves it untracked. [locked]: the queue's lock is held. */
+    private suspend fun writeEvent(name: String, locked: Boolean, prepare: () -> Pending?) {
+        val queue = store ?: return
+        val provider = contextProvider ?: return
+        try {
+            val pending = prepare() ?: return
+            var context = pending.captured.context.toJson(provider.app)
+            var props = pending.properties
+            options.beforeSend?.let { hook ->
+                val redacted = redact(hook, name, props, context) ?: return
+                props = redacted.first
+                context = redacted.second
+            }
+            val propertiesJson = props.toString()
+            val contextJson = context.toString()
+            val size = JsonSnapshot.utf8Length(name) + JsonSnapshot.utf8Length(propertiesJson) +
+                JsonSnapshot.utf8Length(contextJson) + JsonSnapshot.utf8Length(pending.owner ?: "") + EVENT_OVERHEAD_BYTES
+            if (size > EventStore.MAX_BYTES) {
+                KiroraLogger.e("$name not tracked: larger than the event queue")
+                reportDropped(1, EventDropReason.INVALID)
+                return
+            }
+            val entity = EventEntity(
+                idempotencyKey = UUID.randomUUID().toString(),
+                name = name,
+                propertiesJson = propertiesJson,
+                contextJson = contextJson,
+                occurredAt = pending.occurredAt,
+                owner = pending.owner,
+                visitOwner = pending.captured.visitOwner,
+                sizeBytes = size
+            )
+            if (locked) {
+                reportDropped(queue.add(entity), EventDropReason.QUEUE_FULL)
+            } else {
+                queueOrder.withLock { reportDropped(queue.add(entity), EventDropReason.QUEUE_FULL) }
+            }
+            batchManager?.onEventQueued()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            KiroraLogger.e("$name not tracked: it could not be queued", e)
         }
     }
 
@@ -1059,7 +1217,12 @@ public class Kirora internal constructor(
      * can't be read but the refusal copy was read and holds none; with neither copy readable,
      * nothing is collected.
      */
-    private fun trackingAllowed(): Boolean = !destroyed && consentAllowsTracking()
+    private fun trackingAllowed(): Boolean {
+        // Captured on the queue for an earlier call (made before any destroy()): a grant given
+        // since doesn't reach back to it.
+        callMoment.get()?.let { return allowedSince(it.answers) }
+        return !destroyed && consentAllowsTracking()
+    }
 
     /** The tracking choice alone, whether or not this client has been destroyed since. */
     private fun consentAllowsTracking(): Boolean {
@@ -1086,6 +1249,9 @@ public class Kirora internal constructor(
         synchronized(consentReadLock) {
             consent = StoredConsent(answer = granted, answerReadable = true, refusalCopy = !granted)
             consentReadAt = environment.clock()
+            val number = consentAnswers.get() + 1
+            allowedBeforeAnswer[number] = before
+            consentAnswers.set(number)
         }
         persistConsent(granted)
         if (!granted) {
@@ -1093,32 +1259,36 @@ public class Kirora internal constructor(
             forgetTracking()
         } else if (!before && trackingAllowed()) {
             // Tracking starts from now; nothing skipped before is made up.
-            sessionManager?.onConsentGranted()
+            inVisitOrder { sessionManager?.onConsentGranted() }
             scope.launch { batchManager?.flush(waiveBackoff = true) }
         }
         KiroraLogger.d("Tracking consent set to: $granted")
     }
 
-    /** Forgets what behavioural tracking stored, as when the user refuses it. */
-    private fun forgetTracking() {
-        appOpens?.clearAll()
-        sessionManager?.reset()
+    /**
+     * Forgets what behavioural tracking stored, as when the user refuses it. Each step asks
+     * [stillRefused] as it runs (under the visit's, the queue's and the device id's own locks), so
+     * a grant given meanwhile keeps what it allowed.
+     */
+    private fun forgetTracking(stillRefused: () -> Boolean = { true }) {
+        if (stillRefused()) appOpens?.clearAll(stillRefused)
+        inVisitOrder { sessionManager?.reset(onlyIf = stillRefused) }
         val queue = store
         if (queue != null) {
             scope.launchInQueue {
                 try {
-                    queue.clearAll()
+                    if (stillRefused()) queue.clearAll()
                 } catch (e: Exception) {
                     KiroraLogger.e("Couldn't clear events", e)
                 }
             }
         }
-        forgetDeviceIdIfUnused()
+        forgetDeviceIdIfUnused(stillRefused)
     }
 
     /** The device id is also the installation id, so a push registration or detachment may still need it. */
-    private fun forgetDeviceIdIfUnused() {
-        if (pushManager?.needsDeviceId != true) preferences?.forgetDeviceId()
+    private fun forgetDeviceIdIfUnused(stillRefused: () -> Boolean) {
+        if (pushManager?.needsDeviceId != true) preferences?.forgetDeviceId(onlyIf = stillRefused)
     }
 
     // ---- Push ------------------------------------------------------------------------------
@@ -1302,8 +1472,17 @@ public class Kirora internal constructor(
 
     /** For apps with their own `FirebaseMessagingService`: forward `onNewToken` here. */
     public fun onNewPushToken(token: String) {
+        onNewPushIdentifier(token, PushTarget.FCM_TOKEN)
+    }
+
+    /** For apps with their own `FirebaseMessagingService`: forward `onRegistered` here (Firebase's installation-ID mode). */
+    public fun onPushRegistered(installationId: String) {
+        onNewPushIdentifier(installationId, PushTarget.FIREBASE_INSTALLATION_ID)
+    }
+
+    internal fun onNewPushIdentifier(value: String, kind: String) {
         val manager = pushManager
-        if (manager != null && !destroyed) manager.onNewToken(token) else global?.setPushToken(token)
+        if (manager != null && !destroyed) manager.onNewToken(value, kind) else global?.setPushToken(value, kind)
     }
 
     /** True when the push data carries `kirora: "true"`: a Kirora push. Any other push is the app's. */
@@ -1474,7 +1653,7 @@ public class Kirora internal constructor(
 
         /** The app's process lifecycle: whether any of its screens is showing. Replaced in tests. */
         @Volatile
-        internal var processLifecycle: () -> Lifecycle = { ProcessLifecycleOwner.get().lifecycle }
+        internal var processLifecycle: () -> Lifecycle = { AppLifecycle.get() }
 
         /** How long a launch tap's link, ready while the app is in the background, waits for it to return. */
         private const val LAUNCH_LINK_HOLD_MS = 5 * 60_000L
@@ -1599,8 +1778,20 @@ public class Kirora internal constructor(
         @KiroraInternalApi
         @JvmStatic
         public fun handleNewPushToken(context: Context, token: String) {
+            handlePushIdentifier(context, token, PushTarget.FCM_TOKEN)
+        }
+
+        /** Firebase's `onRegistered`: the installation ID, in its installation-ID mode, with or without an instance. */
+        @KiroraInternalApi
+        @JvmStatic
+        public fun handlePushRegistered(context: Context, installationId: String) {
+            handlePushIdentifier(context, installationId, PushTarget.FIREBASE_INSTALLATION_ID)
+        }
+
+        /** Registered once the app signs a user in when there is no client yet. */
+        private fun handlePushIdentifier(context: Context, value: String, kind: String) {
             val current = active
-            if (current != null) current.onNewPushToken(token) else GlobalPreferences(context.applicationContext).setPushToken(token)
+            if (current != null) current.onNewPushIdentifier(value, kind) else GlobalPreferences(context.applicationContext).setPushToken(value, kind)
         }
 
         /**
@@ -1740,7 +1931,7 @@ public class Kirora internal constructor(
             wrapperForegroundHandler = null
             launchIntegration = false
             wrapperCallbacksSet = CompletableDeferred()
-            processLifecycle = { ProcessLifecycleOwner.get().lifecycle }
+            processLifecycle = { AppLifecycle.get() }
             SdkInfo.resetForTesting()
             KiroraPushTracker.resetForTesting()
             SessionManager.resetForTesting()

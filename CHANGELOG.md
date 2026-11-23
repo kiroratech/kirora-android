@@ -5,7 +5,42 @@ need to do anything to upgrade.
 
 ## Unreleased
 
+### Changed (public API, before 1.0)
+- **`KiroraOptions(clientKey = …)`**: `clientKey` is required. It defaulted to `""`, which was
+  always refused at run time. **Action:** pass it (every integration already does).
+- **`KiroraState`** is a plain class, not a `data class`: no `copy()`, destructuring or public
+  constructor, so fields can be added later without breaking apps. Its properties, equality and
+  text form are unchanged. **Action** only for code that called `copy()`, destructured it, or
+  built one itself (a test fixture, say): read its properties instead; only the SDK creates one.
+
+### Added
+- **Firebase installation IDs**: when the app (or any SDK it includes) turns on Firebase's
+  installation-ID registration (`firebase_messaging_installation_id_enabled`), the device registers
+  its installation ID (`targetKind` `firebase_installation_id`) instead of an FCM token, as
+  Customer.io, OneSignal, MoEngage and Batch do. Firebase's token calls fail app-wide in that mode,
+  so a token registration would otherwise stop silently. A token kept from before the switch is
+  never sent as an installation ID. Needs the backend that accepts `firebase_installation_id`; an
+  older one refuses it with a 400 and the device registers on a later launch once it's upgraded.
+  **Action:** none with the built-in service; an app with its own `FirebaseMessagingService` also
+  forwards `onRegistered` to `KiroraPush.onRegistered`.
+
 ### Fixed
+- **`track()` before start-up ends** no longer reads storage on the caller's thread: until the
+  stored consent and visit are in memory, the event (and any lifecycle change or sign-out that
+  follows it) is captured on the SDK's queue, in call order, judged by the consent and the user of
+  the moment it was called.
+- **`Retry-After`** from Kirora, for events and app opens, is kept across restarts: a relaunch
+  doesn't send sooner.
+- **Consent withdrawal**: a send just starting can no longer slip past it, and an event captured as
+  consent is withdrawn can't make the device id again. A grant given while start-up is clearing an
+  earlier refusal keeps the visit, events and device id it allowed.
+- **A notification tap** whose process died while it was being handed over reaches the app when
+  Android recreates the tap screen.
+- **`Application Installed`/`Updated`** is tracked when consent becomes readable after start (storage
+  locked until the first unlock), instead of being skipped for that launch.
+- **Without `androidx.startup`'s `InitializationProvider`** in the app's manifest, the SDK logs an
+  error and follows the app's activities itself, instead of never seeing the app in the foreground.
+  **No action required** for these fixes.
 - **Event context** matches Kirora's event schema of 17 November: `sessionId`, `locale`, `timezone`,
   `device` (`id`, `manufacturer`, `type: "android"`), `app`, `os`, `screen` and `library`, read when
   the event is tracked. The device model and network details (Wi-Fi, cellular, carrier) are no longer
@@ -76,7 +111,7 @@ need to do anything to upgrade.
   up to 7 days (was 24 hours) and only for a device registered for push.
 - `fetchUserToken` times out after 30 seconds (was 15). Lifecycle events carry `version`, `build`,
   `from_background` and `previous_build`; `Screen Viewed` carries `name` only.
-- Database schema is version 5, one file per workspace; the old queue is deleted on upgrade.
+- Database schema is version 6, one file per workspace; a queue from an earlier schema is discarded on upgrade.
 
 ### Added
 - `getPushStatus()`, `setPushEnabled(enabled)`, `destroy()`, `KiroraApiError`, and the options
@@ -130,16 +165,16 @@ need to do anything to upgrade.
   details Maven Central requires in both artifacts' POMs (source repository: `kiroratech/kirora-android`).
 - Early token refresh: with `fetchUserToken` and a token that has `exp`, a new token is fetched 60 seconds
   before expiry and when the app comes to the foreground.
-- `KiroraPushOptions.allowedLinkSchemes` restricts which schemes Kirora opens. The manifest declares `<queries>` for
-  `http`/`https` so link resolution works on Android 11+.
+- `KiroraPushOptions.allowedLinkSchemes` restricts which schemes Kirora opens. A link the app doesn't
+  handle opens with whatever the system offers, and the app opens instead when nothing can (no
+  `<queries>` declaration is needed).
 - `Kirora` refuses secret client keys (`kirora_sk_…`) and stays disabled, logging an error.
 - The sample app's release build is minified, so R8 problems with the SDK's consumer rules surface in CI.
 
 ### Changed
 - **Migration:** removed `KiroraOptions.advertisingId`. The SDK no longer sends `device.advertisingId`
   or `device.adTrackingEnabled`; delete the option if you set it.
-- Removed `KiroraApiError` (never thrown by the SDK), and made `KiroraLogger`/`LogEntry` and
-  `KiroraPushTrampolineActivity` internal. **Migration:** apps that referenced them must stop;
-  none was documented.
+- Made `KiroraLogger`/`LogEntry` and `KiroraPushTrampolineActivity` internal. **Migration:** apps
+  that referenced them must stop; none was documented.
 - `Kirora.handlePushMessage`, `Kirora.handleNewPushToken` and `KiroraPushBridge` are marked
   `@KiroraInternalApi`: they exist for the `android-sdk-push` artifact, not for apps.

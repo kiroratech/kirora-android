@@ -23,6 +23,7 @@ import com.kirora.androidsdk.utils.stringField
 import com.kirora.androidsdk.utils.toApiError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -61,6 +62,8 @@ internal class KiroraBatchManager(
     private val onDropped: (count: Int, reason: EventDropReason) -> Unit = { _, _ -> },
     /** A background token failure, with the token it concerns. */
     private val onAuthFailure: (AuthFailureReason, SignedInUser) -> Unit = { _, _ -> },
+    /** The server's `Retry-After` kept across restarts: read on the first send, written when it changes. */
+    private val serverHold: ServerHold = ServerHold.NONE,
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     private val sendMutex = Mutex()
@@ -76,6 +79,14 @@ internal class KiroraBatchManager(
     /** True when [notBefore] is the server's `Retry-After`, which nothing may cut short. */
     @Volatile
     private var delayFromServer = false
+
+    /** A `Retry-After` saved by an earlier process, read once, before the first send. */
+    private val restoredHold = lazy(this) {
+        serverHold.restore(clock())?.let { until ->
+            notBefore = max(notBefore, until)
+            delayFromServer = true
+        }
+    }
 
     /**
      * The token Kirora last refused when no fresh one could be had. While the signed-in user still
@@ -117,10 +128,12 @@ internal class KiroraBatchManager(
      */
     suspend fun flush(waiveBackoff: Boolean = false) {
         if (destroyed) return
-        val job = scope.launch {
+        // Registered before it starts, so a consent withdrawal or destroy() can't miss it.
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             sendMutex.withLock { sendCurrent(waiveBackoff) }
         }
         inFlight.add(job)
+        job.start()
         try {
             job.join()
         } finally {
@@ -134,14 +147,17 @@ internal class KiroraBatchManager(
      */
     suspend fun flushAs(user: SignedInUser) {
         if (destroyed || !trackingAllowed()) return
-        if (clock() < notBefore && delayFromServer) return
+        restoredHold.value
         // Tracked, so a consent withdrawal or destroy() aborts it as it does any other send.
-        val job = scope.launch {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             sendMutex.withLock {
+                // Checked once the send before it has ended: its answer may have been a Retry-After.
+                if (clock() < notBefore && delayFromServer) return@withLock
                 deliver(user, refreshAllowed = false) { !destroyed && trackingAllowed() }
             }
         }
         inFlight.add(job)
+        job.start()
         try {
             job.join()
         } catch (e: CancellationException) {
@@ -177,6 +193,7 @@ internal class KiroraBatchManager(
 
     private suspend fun sendCurrent(waiveBackoff: Boolean) {
         if (destroyed) return
+        restoredHold.value
         val user = identity.user
         // Backing off after a refused token: a different token is worth trying at once.
         val newToken = refusedToken != null && user != null && user.token != refusedToken
@@ -379,6 +396,7 @@ internal class KiroraBatchManager(
         val delayMs = max(jittered(retryDelayMs), (retryAfterMs * (1 + Random.nextDouble() * JITTER)).toLong())
         notBefore = clock() + delayMs
         delayFromServer = retryAfterMs > 0
+        if (delayFromServer) serverHold.save(notBefore)
         retryDelayMs = min(retryDelayMs * 2, MAX_RETRY_MS)
         schedule(notBefore)
     }
@@ -387,6 +405,7 @@ internal class KiroraBatchManager(
         refusedToken = null
         retryDelayMs = FIRST_RETRY_MS
         notBefore = 0L
+        if (delayFromServer) serverHold.save(0L)
         delayFromServer = false
     }
 

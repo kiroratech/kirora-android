@@ -18,7 +18,9 @@ internal data class RegistrationDetails(
 
 internal class KiroraContextProvider(
     private val context: Context,
-    private val preferences: KiroraPreferences
+    private val preferences: KiroraPreferences,
+    /** Behavioural tracking is still allowed: only then may an event make the device id. */
+    private val trackingAllowed: () -> Boolean = { true }
 ) {
     // Neither changes while the process runs, so they are read once.
     val app: AppInfo by lazy { readApp() }
@@ -28,15 +30,21 @@ internal class KiroraContextProvider(
      * What can change, read when the event is tracked, on the caller's thread: all in memory. The
      * app's details never change while the process runs, so the queue adds them (see [app]).
      */
-    fun getContext(sessionId: String?): KiroraContext = KiroraContext(
-        // Read each time: withdrawing tracking consent can forget it.
-        deviceId = preferences.getDeviceId(),
+    fun getContext(sessionId: String?, surroundings: Surroundings): KiroraContext = KiroraContext(
+        // Read each time: withdrawing tracking consent can forget it. Empty only for an event
+        // captured as consent is withdrawn, which the queue then drops.
+        deviceId = preferences.getDeviceId(trackingAllowed).orEmpty(),
         sessionId = sessionId,
-        locale = locale().orEmpty(),
-        timezone = timezone().orEmpty(),
+        locale = surroundings.locale,
+        timezone = surroundings.timezone,
         device = device,
-        screen = readScreen()
+        screen = surroundings.screen
     )
+
+    /** What can change, all in memory: read at the call, even for an event the queue captures later. */
+    class Surroundings(val locale: String, val timezone: String, val screen: ScreenInfo)
+
+    fun surroundings(): Surroundings = Surroundings(locale().orEmpty(), timezone().orEmpty(), readScreen())
 
     /**
      * What device registration sends beyond the push token: the app's and the OS's version, the

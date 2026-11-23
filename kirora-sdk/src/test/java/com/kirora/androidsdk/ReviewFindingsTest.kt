@@ -48,7 +48,7 @@ import java.util.concurrent.CountDownLatch
 internal class ReviewFindingsTest : KiroraTestBase() {
     private val tokenA = jwt("user-a")
     private val tokenB = jwt("user-b")
-    private val withPush = KiroraOptions(trackSessions = false, push = KiroraPushOptions())
+    private val withPush = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions())
     private val defaultLocale: Locale = Locale.getDefault()
     private var db: KiroraDatabase? = null
 
@@ -62,7 +62,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
 
     @Test
     fun eventContextHoldsOnlyFieldsTheServerAccepts() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = true))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = true))
         kirora.identify(tokenA)
         kirora.track("Checked")
         waitUntil(message = "sent") {
@@ -92,7 +92,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
     @Test
     fun contextIsCapturedWhenTheEventIsTracked() = runBlocking {
         val gate = CountDownLatch(1)
-        val kirora = start(KiroraOptions(trackSessions = false, beforeSend = { event ->
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, beforeSend = { event ->
             if (event.name == "First") gate.await()
             event
         }))
@@ -454,7 +454,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
 
         // Replaced mid-sign-in (a hot reload): the new client carries the user, and its first send is refused.
         val failures = CopyOnWriteArrayList<AuthFailureReason>()
-        val replacement = start(KiroraOptions(trackSessions = false, onAuthenticationFailed = { failures.add(it) }))
+        val replacement = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, onAuthenticationFailed = { failures.add(it) }))
         assertTrue(replacement.isIdentified)
         fake.batchResponder = { _, _ -> FakeKiroraApiService.error(401, "UNAUTHORIZED") }
         replacement.track("E")
@@ -505,7 +505,7 @@ internal class ReviewFindingsTest : KiroraTestBase() {
     @Test
     fun withdrawingConsentForgetsTheStoredAppOpenTime() = runBlocking {
         GlobalPreferences(context).setPushToken("fcm-1")
-        val kirora = start(KiroraOptions(trackSessions = true, push = KiroraPushOptions()))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = true, push = KiroraPushOptions()))
         kirora.identify(tokenA)
         kirora.appOpens!!.onAppOpen()
         waitUntil(message = "the app open") { fake.appOpens.size == 1 }

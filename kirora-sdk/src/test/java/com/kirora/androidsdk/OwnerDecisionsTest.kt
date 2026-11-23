@@ -22,7 +22,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 internal class OwnerDecisionsTest : KiroraTestBase() {
     private val token = jwt("user-a")
-    private val push = KiroraOptions(trackSessions = false, push = KiroraPushOptions())
+    private val push = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions())
 
     // ---- a refused token with no fetchUserToken pauses app opens ------------------------------
 

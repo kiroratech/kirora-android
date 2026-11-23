@@ -19,7 +19,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 internal class LogoutDropsUnboundTest : KiroraTestBase() {
     // Lifecycle events off: an app event the process lifecycle adds (Application Opened, say) isn't this test's.
-    private val sessions = KiroraOptions(trackSessions = true, trackAppLifecycle = false)
+    private val sessions = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = true, trackAppLifecycle = false)
 
     @Test
     fun aRestoredSessionSignedOutBeforeIdentifyDropsWhatItsUserTracked() = runBlocking {

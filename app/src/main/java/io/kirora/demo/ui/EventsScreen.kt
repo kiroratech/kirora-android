@@ -28,7 +28,7 @@ fun EventsScreen(store: DemoStore, modifier: Modifier = Modifier) {
     val snapshot by store.snapshot.collectAsState()
     val sent by store.sent.collectAsState()
     var name by rememberSaveable { mutableStateOf("Order Completed") }
-    var props by rememberSaveable { mutableStateOf("amount=12500\ncurrency=NGN") }
+    var props by rememberSaveable { mutableStateOf("total=125.00\ncurrency=NGN") }
 
     if (!snapshot.connected) {
         EmptyState("Not connected", "Connect your workspace on the first tab.", modifier)

@@ -17,6 +17,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.UUID
 
 /**
  * Transparent Activity that is the destination of a notification and of its buttons (no service
@@ -32,27 +33,33 @@ internal class KiroraPushTrampolineActivity : Activity() {
     /** The tap being handled, until it has reached the app; then null. */
     private var pending: Tap? = null
 
+    /** This instance has a tap, so a recreation in another process (after a process death) hands it over. */
+    private var handlingTap = false
+
     /** [clicked]: the tap follows a link or a button (`clicked`), rather than a plain `opened`. */
     private class Tap(val data: Map<String, String>, val actionUrl: String?, val clicked: Boolean)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Recreated (a configuration change): the first instance already handed the tap over.
+        // Recreated. In this same process (a configuration change, or the system ending the
+        // activity alone), the first instance handed the tap over as it went. After a process
+        // death mid-wait, nothing did: it reaches the app now, by the same route, and is reported
+        // again (Kirora counts only the first report).
         if (savedInstanceState != null) {
-            finish()
-            return
+            val tapProcess = savedInstanceState.getString(STATE_TAP_PROCESS)
+            if (tapProcess == null || tapProcess == PROCESS) {
+                finish()
+                return
+            }
+            handlingTap = true
         }
-        val tap = try {
-            readTap(intent)
-        } catch (e: Exception) {
-            KiroraLogger.e("Error processing notification trampoline intent", e)
-            null
-        }
+        val tap = readTapSafely(intent)
         if (tap == null) {
             finish()
             return
         }
         pending = tap
+        handlingTap = true
         // Stays (invisible) while the tap waits for its report and any wrapper's answer.
         mainScope.launch {
             try {
@@ -66,6 +73,11 @@ internal class KiroraPushTrampolineActivity : Activity() {
                 finish()
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        if (handlingTap) outState.putString(STATE_TAP_PROCESS, PROCESS)
     }
 
     override fun onDestroy() {
@@ -87,6 +99,13 @@ internal class KiroraPushTrampolineActivity : Activity() {
         pending = null
         Kirora.deliverNotificationTap(tap.data)
         return true
+    }
+
+    private fun readTapSafely(intent: Intent?): Tap? = try {
+        readTap(intent)
+    } catch (e: Exception) {
+        KiroraLogger.e("Error processing notification trampoline intent", e)
+        null
     }
 
     private fun readTap(intent: Intent?): Tap? {
@@ -161,6 +180,10 @@ internal class KiroraPushTrampolineActivity : Activity() {
         const val EXTRA_NOTIFICATION_TAG: String = "kirora_notification_tag"
         const val EXTRA_NOTIFICATION_ID: String = "kirora_notification_id"
         private const val ACTION_URL = "actionUrl"
+        private const val STATE_TAP_PROCESS = "kirora_tap_process"
+
+        /** Names this process, so a recreated tap screen knows whether its tap was handed over here already. */
+        private val PROCESS = UUID.randomUUID().toString()
         private val BLOCKED_SCHEMES = setOf("javascript", "file", "content", "intent", "data")
 
         internal fun openable(url: String): Boolean {

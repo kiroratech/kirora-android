@@ -104,7 +104,7 @@ internal class IdentityConformanceTest : KiroraTestBase() {
     @Test
     fun logoutSendsAndDetachesWithTheOutgoingTokenThenDropsWhatIsLeft() = runBlocking {
         GlobalPreferences(context).setPushToken("fcm-1")
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         kirora.identify(tokenA)
         assertEquals(1, fake.deviceRegistrations.size)
         kirora.track("Sent at logout")
@@ -140,7 +140,7 @@ internal class IdentityConformanceTest : KiroraTestBase() {
 
     @Test
     fun logoutStaysWithinItsDeadlineWhenTheTokenFetchHangs() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = false, fetchUserToken = { delay(60_000); tokenA }))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, fetchUserToken = { delay(60_000); tokenA }))
         kirora.identifyAsync()
         val started = System.currentTimeMillis()
         kirora.logout()
@@ -151,7 +151,7 @@ internal class IdentityConformanceTest : KiroraTestBase() {
     @Test
     fun anOfflineDetachKeepsRetryingWhateverRegistersNext() = runBlocking {
         GlobalPreferences(context).setPushToken("fcm-1")
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         kirora.identify(tokenA)
         fake.deleteResponder = { FakeKiroraApiService.error(503) }
         kirora.logout()
@@ -167,7 +167,7 @@ internal class IdentityConformanceTest : KiroraTestBase() {
     @Test
     fun everyDetachNamesTheLastRegistrationAndA409EndsIt() = runBlocking {
         GlobalPreferences(context).setPushToken("fcm-1")
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         kirora.identify(tokenA)
         // A signs out, but the device was registered again since (another process): Kirora keeps it.
         fake.deleteResponder = { FakeKiroraApiService.error(409, "CONFLICT") }
@@ -185,7 +185,7 @@ internal class IdentityConformanceTest : KiroraTestBase() {
     @Test
     fun aRefusedDetachIsNotRetried() = runBlocking {
         GlobalPreferences(context).setPushToken("fcm-1")
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         kirora.identify(tokenA)
         fake.deleteResponder = { FakeKiroraApiService.error(401, "UNAUTHORIZED") }
         kirora.logout()
@@ -194,7 +194,7 @@ internal class IdentityConformanceTest : KiroraTestBase() {
 
     @Test
     fun identifyThrowsOnlyForTheToken() = runBlocking {
-        val kirora = start(KiroraOptions(trackSessions = false, fetchUserToken = { throw IllegalStateException("down") }))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, fetchUserToken = { throw IllegalStateException("down") }))
         try {
             kirora.identify()
             fail("expected UserTokenError")
@@ -204,7 +204,7 @@ internal class IdentityConformanceTest : KiroraTestBase() {
 
         // A push registration that fails for another reason is only logged.
         GlobalPreferences(context).setPushToken("fcm-1")
-        val withPush = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions()))
+        val withPush = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
         fake.deviceResponder = { FakeKiroraApiService.error(500) }
         withPush.identify(tokenA)
         assertTrue(withPush.isIdentified)
@@ -221,7 +221,7 @@ internal class IdentityConformanceTest : KiroraTestBase() {
     @Test
     fun aTokenFetchedForAnEarlierSignInIsDiscarded() = runBlocking {
         var calls = 0
-        val kirora = start(KiroraOptions(trackSessions = false, fetchUserToken = {
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, fetchUserToken = {
             calls++
             if (calls == 1) {
                 delay(500)

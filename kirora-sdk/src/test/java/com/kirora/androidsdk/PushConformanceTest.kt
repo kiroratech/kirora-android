@@ -33,7 +33,7 @@ import retrofit2.Response
 @Config(sdk = [34])
 internal class PushConformanceTest : KiroraTestBase() {
     private val token = jwt("user-a")
-    private val pushOptions = KiroraOptions(trackSessions = false, push = KiroraPushOptions())
+    private val pushOptions = KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions())
 
     @Test
     fun registrationPutsTheDeviceIdInThePathAndSendsTheDeviceDetails() = runBlocking {
@@ -242,7 +242,7 @@ internal class PushConformanceTest : KiroraTestBase() {
     @Test
     fun aTapReachesTheAppAfterItsReport() = runBlocking {
         var routed: String? = null
-        start(KiroraOptions(trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
+        start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
         val release = CompletableDeferred<Unit>()
         fake.trackingResponder = {
             release.await()
@@ -261,7 +261,7 @@ internal class PushConformanceTest : KiroraTestBase() {
     @Test
     fun aTapWaitsAtMostOneAndAHalfSecondsForItsReport() = runBlocking {
         var routed: String? = null
-        start(KiroraOptions(trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
+        start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
         fake.trackingResponder = { CompletableDeferred<Response<Unit>>().await() } // never answers
         tap("myapp://order/1")
         waitUntil(message = "the report on its way") { fake.trackingReports.isNotEmpty() }
@@ -275,7 +275,7 @@ internal class PushConformanceTest : KiroraTestBase() {
     fun aTapStillReachesTheAppWhenTheTapScreenClosesDuringTheWait() = runBlocking {
         var routed: String? = null
         val taps = mutableListOf<Map<String, String>>()
-        val kirora = start(KiroraOptions(trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions(), handleDeepLink = { routed = it; true }))
         kirora.addNotificationClickListener { taps += it }
         fake.trackingResponder = { CompletableDeferred<Response<Unit>>().await() } // never answers
         val screen = tap("myapp://order/1")

@@ -26,7 +26,7 @@ internal class TokenRuleTest : KiroraTestBase() {
 
     private fun refusedAfterRefreshTo(signIn: String, fresh: String): List<AuthFailureReason> = runBlocking {
         val seen = Collections.synchronizedList(mutableListOf<AuthFailureReason>())
-        val kirora = start(KiroraOptions(trackSessions = false, fetchUserToken = { fresh }, onAuthenticationFailed = { seen.add(it) }))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, fetchUserToken = { fresh }, onAuthenticationFailed = { seen.add(it) }))
         kirora.identify(signIn)
         fake.batchResponder = { _, _ -> FakeKiroraApiService.error(401, "UNAUTHORIZED") }
         kirora.track("E")
@@ -98,7 +98,7 @@ internal class TokenRuleTest : KiroraTestBase() {
     fun theEarlyRefreshIsScheduledFromTheLifetimeNotTheFarAwayExp() = runBlocking {
         Kirora.minRefreshDelayMs = 10
         var fetched = 0
-        val kirora = start(KiroraOptions(trackSessions = false, fetchUserToken = { fetched++; jwt("user-a", nonce = "$fetched") }))
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, fetchUserToken = { fetched++; jwt("user-a", nonce = "$fetched") }))
         val deviceNow = System.currentTimeMillis() / 1000
         // An hour ahead, valid for 50 seconds: within the minute before it runs out, so due now.
         kirora.identify(jwt("user-a", iat = deviceNow + 3_600, exp = deviceNow + 3_650))
