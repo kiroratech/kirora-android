@@ -129,6 +129,20 @@ internal class KiroraPushManager(
         scope.launch { if (kind == targetKind) registerLogged(user) }
     }
 
+    /**
+     * Back online: a signed-in device not registered yet tries again. Firebase gives up on a token
+     * it couldn't get offline (a first launch with no network), so nothing else would until the
+     * next launch.
+     */
+    fun onNetworkAvailable() {
+        if (!pushEnabled || destroyed) return
+        // Off the network callback's thread: the check reads stored state.
+        scope.launch {
+            val user = identity.user ?: return@launch
+            if (registeredToken(user) == null) registerLogged(user)
+        }
+    }
+
     /** Registers in the background, logging a failure. */
     suspend fun registerLogged(user: SignedInUser) {
         try {

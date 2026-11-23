@@ -277,6 +277,26 @@ internal class KnownRisksTest : KiroraTestBase() {
     }
 
     @Test
+    fun aDeviceWithNoPushTokenAtSignInRegistersOnceTheNetworkIsBack() = runBlocking {
+        // A first launch offline: Firebase has no token, and gives up until asked again.
+        bridge.token = null
+        val kirora = start(KiroraOptions(clientKey = "kirora_pk_test", trackSessions = false, push = KiroraPushOptions()))
+        kirora.identify(jwt("user-a"))
+        delay(200)
+        assertEquals(0, fake.deviceRegistrations.size)
+
+        bridge.token = "fcm-late"
+        kirora.pushManager!!.onNetworkAvailable()
+        waitUntil(message = "registered once back online") { fake.deviceRegistrations.isNotEmpty() }
+        assertEquals("fcm-late", fake.deviceRegistrations.single().second.target)
+
+        // Registered now: coming back online again registers nothing more.
+        kirora.pushManager!!.onNetworkAvailable()
+        delay(200)
+        assertEquals(1, fake.deviceRegistrations.size)
+    }
+
+    @Test
     fun aRetryAfterOutlivesARestart() = runBlocking {
         var now = System.currentTimeMillis()
         val first = start(clock = { now })

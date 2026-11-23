@@ -457,6 +457,7 @@ public class Kirora internal constructor(
         val netMon = KiroraNetworkMonitor(app) {
             batchMgr.onNetworkAvailable()
             opens.onNetworkAvailable()
+            pushMgr.onNetworkAvailable()
         }
         netMon.start()
         networkMonitor = netMon

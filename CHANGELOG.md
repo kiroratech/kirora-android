@@ -29,6 +29,9 @@ need to do anything to upgrade.
   stored consent and visit are in memory, the event (and any lifecycle change or sign-out that
   follows it) is captured on the SDK's queue, in call order, judged by the consent and the user of
   the moment it was called.
+- **Push registration offline**: a signed-in device that couldn't register (a first launch with no
+  network, when Firebase gives up on its token) registers once the network is back, instead of at
+  the next launch.
 - **`Retry-After`** from Kirora, for events and app opens, is kept across restarts: a relaunch
   doesn't send sooner.
 - **Consent withdrawal**: a send just starting can no longer slip past it, and an event captured as

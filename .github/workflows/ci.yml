@@ -23,6 +23,22 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v6
+      # Robolectric downloads an Android runtime per version tested on first use; kept between
+      # runs, so a network hiccup at that download can't fail the unit tests. Keyed on what decides
+      # which runtimes are needed: Robolectric's version, the tests' @Config(sdk) levels and compileSdk.
+      - name: Robolectric cache key
+        id: robolectric
+        run: |
+          version=$(sed -nE 's/^robolectric = "(.*)"/\1/p' gradle/libs.versions.toml)
+          levels=$( { { grep -rhoE 'sdk = \[[0-9, ]+\]' kirora-sdk*/src/test || true; } | tr -dc '0-9,\n' | tr ',' '\n'; \
+            sed -nE 's/^ *compileSdk = ([0-9]+).*/\1/p' kirora-sdk*/build.gradle.kts; } | sed '/^$/d' | sort -un | paste -sd- -)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "key=robolectric-$version-sdk-$levels" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: ${{ steps.robolectric.outputs.key }}
+          restore-keys: robolectric-${{ steps.robolectric.outputs.version }}-
       - name: Unit tests
         run: ./gradlew :kirora-sdk:testDebugUnitTest :kirora-sdk-push:testDebugUnitTest
       - name: Lint
