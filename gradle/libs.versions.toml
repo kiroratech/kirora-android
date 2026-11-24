@@ -1,5 +1,5 @@
 [versions]
-agp = "9.5.1"
+agp = "9.5.2"
 binaryCompatibilityValidator = "0.18.1"
 vanniktechPublish = "0.37.0"
 coreKtx = "1.16.0"
