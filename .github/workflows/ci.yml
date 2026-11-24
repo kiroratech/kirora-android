@@ -34,7 +34,7 @@ jobs:
             sed -nE 's/^ *compileSdk = ([0-9]+).*/\1/p' kirora-sdk*/build.gradle.kts; } | sed '/^$/d' | sort -un | paste -sd- -)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "key=robolectric-$version-sdk-$levels" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.m2/repository/org/robolectric
           key: ${{ steps.robolectric.outputs.key }}
