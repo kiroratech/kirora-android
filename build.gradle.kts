@@ -21,7 +21,7 @@ subprojects {
         }
         dependencies {
             add(validatorClasspath.name, "org.ow2.asm:asm:9.6")
-            add(validatorClasspath.name, "org.ow2.asm:asm-tree:9.6")
+            add(validatorClasspath.name, "org.ow2.asm:asm-tree:9.11.1")
             add(validatorClasspath.name, "org.jetbrains.kotlin:kotlin-metadata-jvm:${libs.versions.kotlin.get()}")
         }
         val apiBuild = tasks.register<kotlinx.validation.KotlinApiBuildTask>("apiBuild") {
